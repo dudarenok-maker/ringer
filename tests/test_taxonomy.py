@@ -92,6 +92,23 @@ alias = true
 confidence = "verified"
 source = "fixture"
 
+[engines.tworoutes]
+harness = "Shared CLI"
+access = "Prepaid pass"
+
+[engines.tworoutes.models."paid/model"]
+display = "Shared Model"
+lab = "SharedLab"
+confidence = "verified"
+source = "fixture"
+
+[engines.tworoutes.models."free/model"]
+display = "Shared Model"
+lab = "SharedLab"
+access = "Free tier"
+confidence = "verified"
+source = "fixture"
+
 [engines.opencode]
 harness = "OpenCode"
 access = "OpenRouter API"
@@ -194,6 +211,32 @@ source = "fixture"
         self.assertEqual(("DemoLab", True), (alias.lab, alias.alias))
         self.assertEqual("vendor?", registry.resolve("opencode", "openrouter/vendor/model").lab)
         self.assertEqual("(unverified)", registry.resolve("custom", "model").lab)
+
+    def test_a_model_may_override_its_engines_access_route(self) -> None:
+        # ONE ENGINE KEY, TWO BILLING ROUTES. The live case is `cline`, which
+        # serves the prepaid pass but still carries rows from when the free
+        # daily-quota route ran under the same key. Access hung off the engine
+        # alone, so those rows were labelled as pass spend - the API/Plan column
+        # stating the opposite of what they cost, with nothing else in the row
+        # able to contradict it (same harness, same model display).
+        registry = load_model_identity_registry(self.registry_path)
+        paid = registry.resolve("tworoutes", "paid/model")
+        free = registry.resolve("tworoutes", "free/model")
+        self.assertEqual("Prepaid pass", paid.access, "no override must inherit the engine value")
+        self.assertEqual("Free tier", free.access, "an override must win over the engine value")
+        # Everything else still comes from the engine: an override of access is
+        # not a licence to fork the harness.
+        self.assertEqual("Shared CLI", free.harness)
+        self.assertEqual(paid.harness, free.harness)
+
+    def test_an_engine_without_a_models_block_still_supplies_harness_and_access(self) -> None:
+        # The copilot shape: unattributable by design, so it registers no model
+        # at all. Its rows must still resolve a harness and a plan, or the two
+        # columns that do not depend on model identity go blank for no reason.
+        registry = load_model_identity_registry(self.registry_path)
+        meta = registry.engine_meta["tworoutes"]
+        self.assertEqual("Shared CLI", meta.harness)
+        self.assertEqual("Prepaid pass", meta.access)
 
     def test_attempt_logging_records_explicit_effort_and_null_when_absent(self) -> None:
         log_path = self.root / "attempts.jsonl"

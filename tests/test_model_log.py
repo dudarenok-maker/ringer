@@ -23,6 +23,7 @@ from ringer import (  # noqa: E402
     VerifyResult,
     WorkerResult,
     aggregate_model_log_rows,
+    aggregate_model_scoreboard_rows,
     model_log_row_counts_toward_score,
     model_log_row_is_retry,
     read_model_log_rows,
@@ -466,6 +467,126 @@ class CountsTowardScoreTests(unittest.TestCase):
         )
         group = aggregate_model_log_rows(rows, task_type="ops")[0]
         self.assertEqual(group["last_seen"], "2026-08-18T09:00:00+00:00")
+
+    def test_total_tokens_sums_every_attempt_including_retries(self) -> None:
+        # The plain case: the total is a sum over ATTEMPTS, not over tasks, so
+        # a task that needed three tries costs what all three tries cost. An
+        # implementation that summed only the final attempt of each task would
+        # under-report every retried task and would still look right on a log
+        # where nothing was ever retried.
+        rows = [row for row in self._rows() if row.get("counts_toward_score") is not False]
+        rows.append(
+            {
+                "worker_engine": "claude",
+                "model": "claude-sonnet-5",
+                "task_type": "ops",
+                "run_id": "real2",
+                "task_key": "real2",
+                "verdict": "PASS",
+                "duration_ms": 500_000,
+                "worker_tokens": 250_000,
+                "notes": "retry=true",
+                "logged_at": "2026-08-17T18:25:00+00:00",
+            }
+        )
+        group = aggregate_model_log_rows(rows, task_type="ops")[0]
+        self.assertEqual(group["attempts"], 3)
+        self.assertEqual(group["total_tokens"], 4_250_000)
+
+    def test_total_tokens_includes_no_op_runs_that_the_median_excludes(self) -> None:
+        # THE DESIGN DECISION, PINNED. The two token columns count different
+        # sets on purpose: the median is a quality statistic and drops runs
+        # that never started, while the total is a SPEND figure and must not,
+        # because a run that burned tokens before dying still drew on the
+        # budget. Observed on the live log: 3.4M tokens sat on rows marked
+        # not-scored, essentially all of it on two runs.
+        #
+        # The fixture's six no-ops are zero-token, so one of them is given real
+        # spend here - a fixture of all zeros cannot tell "includes no-ops"
+        # apart from "excludes them".
+        rows = self._rows()
+        for row in rows:
+            if row["run_id"] == "dead3":
+                row["worker_tokens"] = 500_000
+        group = aggregate_model_log_rows(rows, task_type="ops")[0]
+        self.assertEqual(group["not_scored"], 6)
+        # Unchanged: the median still sees only the two real runs.
+        self.assertEqual(group["median_tokens"], 2_000_000)
+        # The total sees the dead launch's spend as well.
+        self.assertEqual(group["total_tokens"], 4_500_000)
+
+    def test_total_tokens_and_median_are_not_reconcilable(self) -> None:
+        # The corollary, stated as a test so nobody "fixes" the divergence
+        # later: median x tasks does NOT reproduce the total, and the gap is
+        # the no-op spend. If this ever passes trivially because both sides
+        # were made to count the same set, the spend column has quietly stopped
+        # being a spend column.
+        rows = self._rows()
+        for row in rows:
+            if row["run_id"] == "dead3":
+                row["worker_tokens"] = 500_000
+        group = aggregate_model_log_rows(rows, task_type="ops")[0]
+        self.assertNotEqual(group["total_tokens"], group["median_tokens"] * group["tasks"])
+
+    def test_the_rollup_aggregator_reports_the_same_total(self) -> None:
+        # There are TWO aggregators and they feed different surfaces: the CLI
+        # table reads this one's sibling, while the HTML scoreboard and the
+        # Ringside models tab read this one. The file already carries a comment
+        # warning that patching one leaves the other reporting the numbers the
+        # first had just stopped reporting - so assert them against each other
+        # rather than trusting that warning was heeded.
+        rows = self._rows()
+        for row in rows:
+            if row["run_id"] == "dead3":
+                row["worker_tokens"] = 500_000
+        grouped = aggregate_model_log_rows(rows, task_type="ops")[0]
+        rolled = aggregate_model_scoreboard_rows(rows, task_type="ops")[0]
+        self.assertEqual(rolled["total_tokens"], 4_500_000)
+        self.assertEqual(rolled["total_tokens"], grouped["total_tokens"])
+
+    def test_total_tokens_is_blank_not_zero_when_nothing_was_recorded(self) -> None:
+        # A printed 0 claims a measurement. Rows whose runs never reported a
+        # token count at all - the unattributed legacy rows, copilot, anything
+        # whose CLI prints no usage - have no spend evidence, and rendering
+        # them as "0 tokens" states something the log does not say. None here,
+        # blank in every renderer, exactly as the median cell beside it
+        # already behaves.
+        rows = [
+            {
+                "worker_engine": "copilot",
+                "model": "auto",
+                "task_type": "ops",
+                "run_id": "r1",
+                "task_key": "r1",
+                "verdict": "PASS",
+                "duration_ms": 1_000,
+                "logged_at": "2026-08-17T16:25:00+00:00",
+            }
+        ]
+        group = aggregate_model_log_rows(rows, task_type="ops")[0]
+        self.assertIsNone(group["total_tokens"])
+        self.assertIsNone(group["median_tokens"])
+        self.assertIsNone(aggregate_model_scoreboard_rows(rows, task_type="ops")[0]["total_tokens"])
+
+    def test_a_recorded_zero_is_a_measurement_and_still_prints(self) -> None:
+        # The other half of the line above, and the reason "blank when falsy"
+        # would be wrong: a run that genuinely reported zero tokens HAS been
+        # measured. Only an absent value blanks.
+        rows = [
+            {
+                "worker_engine": "copilot",
+                "model": "auto",
+                "task_type": "ops",
+                "run_id": "r1",
+                "task_key": "r1",
+                "verdict": "PASS",
+                "duration_ms": 1_000,
+                "worker_tokens": 0,
+                "logged_at": "2026-08-17T16:25:00+00:00",
+            }
+        ]
+        group = aggregate_model_log_rows(rows, task_type="ops")[0]
+        self.assertEqual(group["total_tokens"], 0)
 
     def test_a_group_that_never_scored_reports_no_rate(self) -> None:
         rows = [row for row in self._rows() if row.get("counts_toward_score") is False]

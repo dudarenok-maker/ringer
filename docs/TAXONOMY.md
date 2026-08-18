@@ -32,7 +32,7 @@ Lint must reject a manifest task that resolves to a declared noncanonical engine
 
 Grok 4.5 is the worked example: its canonical route is `grok:grok-build`, meaning Grok 4.5 by xAI through the Grok Build CLI on the OAuth plan. `opencode:openrouter/x-ai/grok-4.5` is a noncanonical route to that artifact. A historical row from it displays **Grok 4.5 | xAI | OpenCode | OpenRouter API**, marked `misrouted` and not ranked. It must never become a normal OpenCode registry model entry.
 
-Every primary scoreboard table uses exactly these columns, in this order: **Model | Lab | Harness | API/Plan | Tier | Tasks | First try | Pass | Tokens (median) | Speed (median) | Last used | Notes**. Model contains the registry display name plus the reasoning-effort suffix required below, never a raw slug or slug parenthetical. Unregistered rows derive a readable display name and keep the raw slug only in the diagnostics pointer. Notes is the most recent dated bullet read from `docs/MODEL-NOTES.md` at render time; the other dated bullets may appear in expandable detail. Attempts and failed counts are detail data, not primary columns.
+Every primary scoreboard table uses exactly these columns, in this order: **Model | Lab | Harness | API/Plan | Tier | Tasks | First try | Pass | Tokens (median) | Tokens (total) | Speed (median) | Last used | Notes**. The two token columns answer different questions and are not reconcilable against each other: the median is a quality statistic over scored attempts only, while the total is a spend figure over every attempt recorded for the model, including the ones excluded from scoring, so `median x tasks` will not reproduce it. Model contains the registry display name plus the reasoning-effort suffix required below, never a raw slug or slug parenthetical. Unregistered rows derive a readable display name and keep the raw slug only in the diagnostics pointer. Notes is the most recent dated bullet read from `docs/MODEL-NOTES.md` at render time; the other dated bullets may appear in expandable detail. Attempts and failed counts are detail data, not primary columns.
 
 ## Reasoning effort
 
@@ -57,6 +57,8 @@ confidence = "verified"
 source = "<source-url>"
 last_verified = <YYYY-MM-DD>
 ```
+
+`access` may also be set on a model entry, and then overrides its engine's value for that route only. Use it when one engine key serves more than one billing route — the local `cline` key serves the prepaid pass but still carries rows from when the free daily-quota route ran under it, and those two cost different budgets while sharing a harness and a display name, so API/Plan is the only column that can tell them apart. Everything else still comes from the engine; an access override is not a licence to fork the harness.
 
 Keep the prohibitions short: do not use a harness, CLI, provider, plan, or fixture name as a model or lab; do not mark derived `?` identity as verified without the lab's source; do not assign unattributed legacy results to an engine default.
 

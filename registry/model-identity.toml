@@ -98,3 +98,103 @@ lab = "Meta"
 confidence = "verified"
 source = "manifest model field; OpenRouter slug meta-llama/llama-3.3-70b-instruct:free"
 last_verified = 2026-07-10
+
+# ---------------------------------------------------------------------------
+# The Open Engine worker lanes on this box. Five Ringer engine keys, three of
+# which are the SAME Cline runtime on three CONCURRENTLY AVAILABLE billing
+# routes - not a succession, three live budgets - which is exactly why `access`
+# is the column that separates them. Harness is identical for those three; only
+# the route differs, so nothing else in the row can tell them apart.
+#
+#   cline       Cline Pass, prepaid balance
+#   cline-free  Cline free tier, hard daily quota
+#   cline-glm   glm-5.2 on BytePlus ARK, Lite package
+#
+# Access values are operator-confirmed (2026-08-18). Model identities are NOT
+# marked verified: no lab source has been checked for either slug yet, and the
+# taxonomy forbids promoting a slug-derived identity without one.
+#
+# ONE CELL HERE IS A DEFAULT, NOT A FACT: an unattributed legacy row has no
+# model, so it resolves through the ENGINE block and inherits that engine's
+# access. For `cline` that prints "Cline Pass", and the one such row (2026-08-14)
+# predates the 2026-08-16 correction that pointed this engine at the pass
+# provider - so it most likely ran the free route. The row is already marked
+# unattributed and not ranked; do not read its API/Plan cell as evidence of what
+# it cost.
+# ---------------------------------------------------------------------------
+
+[engines.claude]
+harness = "Claude Code"
+access = "Max 20x plan"          # operator-confirmed 2026-08-18
+default_model_key = "claude-sonnet-5"
+
+[engines.claude.models."claude-sonnet-5"]
+display = "Claude Sonnet 5"
+lab = "Anthropic"
+confidence = "verified"     # pinned on the command line via --model, so the recorded slug is true by construction
+source = "~/.config/ringer/config.toml [engines.claude] args_template"
+last_verified = 2026-08-18
+
+[engines.cline]
+harness = "Cline CLI"
+access = "Cline Pass"            # operator-confirmed 2026-08-18; prepaid balance
+default_model_key = "cline-pass/deepseek-v4-flash"
+
+[engines.cline.models."cline-pass/deepseek-v4-flash"]
+display = "DeepSeek V4 Flash"
+lab = "DeepSeek"
+confidence = "unverified"   # slug-derived; DeepSeek's own model page has not been checked
+source = "live probe 2026-08-16: cline.exe -m cline-pass/deepseek-v4-flash resolves"
+last_verified = 2026-08-18
+
+[engines.cline.models."deepseek/deepseek-v4-flash"]
+# THE FREE ROUTE UNDER THE OLD ENGINE KEY. Cline Free and Cline Pass are two
+# budgets that COEXIST - free was never superseded by the pass - but before the
+# cline-free engine key existed, a run took the free route by forcing the
+# prefixed slug through this one. Those rows are still in the log, and they
+# cost free-tier quota, not pass balance. Registering the override here is what
+# keeps the API/Plan column honest about them; the engine-level value cannot,
+# because this engine key served both budgets.
+display = "DeepSeek V4 Flash"
+lab = "DeepSeek"
+access = "Cline free tier"
+confidence = "unverified"
+source = "observed 2026-08-15: this route hit the free tier's daily cap mid-run"
+last_verified = 2026-08-18
+
+[engines.cline-free]
+harness = "Cline CLI"
+access = "Cline free tier"       # operator-confirmed 2026-08-18; hard daily quota
+default_model_key = "deepseek/deepseek-v4-flash"
+
+[engines.cline-free.models."deepseek/deepseek-v4-flash"]
+display = "DeepSeek V4 Flash"
+lab = "DeepSeek"
+confidence = "unverified"
+source = "prefixed slug forces the free route; proven 2026-08-15 when it overrode an app set to cline-pass"
+last_verified = 2026-08-18
+
+[engines.cline-glm]
+harness = "Cline CLI"
+access = "BytePlus ARK Lite"     # operator-confirmed 2026-08-18; Lite package
+default_model_key = "glm-5.2"
+
+[engines.cline-glm.models."glm-5.2"]
+# The bare id carries no provider prefix, so the ROUTE is established by the
+# lane's own provider store rather than by the id. Verified on the live lane:
+# ~/.cline-oe/cline-glm/sessions records provider='openai-compatible',
+# model='glm-5.2', and that provider's baseUrl is BytePlus ARK ap-southeast.
+display = "GLM 5.2"
+lab = "Z.ai (Zhipu AI)"
+confidence = "unverified"   # the lab is this registry's own verified identity for GLM 5.2, but that BytePlus's `glm-5.2` IS that model has not been confirmed at source
+source = "~/.cline/data/settings/models.json: openai-compatible baseUrl https://ark.ap-southeast.bytepluses.com/api/coding/v3, defaultModelId glm-5.2"
+last_verified = 2026-08-18
+
+[engines.copilot]
+# NO MODELS BLOCK, DELIBERATELY. A free-plan account can only use `auto`, which
+# picks per request, and copilot's output self-reports no model - so no single
+# id is true and the lane is unattributable by design. Its rows resolve through
+# this engine block alone, which is enough to fill Harness and API/Plan without
+# inventing a model identity. Do not "fix" this by guessing a slug.
+harness = "GitHub Copilot CLI"
+access = "Copilot free plan"     # operator-confirmed; live probe 2026-08-15 refused reasoning effort on `auto`, which only the free plan forces

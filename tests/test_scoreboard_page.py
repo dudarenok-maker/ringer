@@ -256,6 +256,7 @@ class ScoreboardPageTests(unittest.TestCase):
             "First try",
             "Pass",
             "Tokens (median)",
+            "Tokens (total)",
             "Speed (median)",
             "Last used",
             "Notes",

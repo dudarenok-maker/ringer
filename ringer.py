@@ -5261,19 +5261,21 @@ def inject_models_tab_into_ringside_html(html: str) -> str:
             `<td class="numeric">${html(percent(row.first_try_pass_rate))}</td>`,
             `<td class="numeric">${html(percent(row.pass_rate))}</td>`,
             `<td class="numeric">${row.median_tokens === null || row.median_tokens === undefined ? "" : numberOrZeroLocal(row.median_tokens).toLocaleString()}</td>`,
+            `<td class="numeric">${row.total_tokens === null || row.total_tokens === undefined ? "" : numberOrZeroLocal(row.total_tokens).toLocaleString()}</td>`,
             `<td>${html(modelDuration(row.median_duration_ms))}</td>`,
             `<td>${html(modelDate(row.last_seen))}</td>`,
             `<td class="model-notes" title="${html(notes)}">${html(row.latest_note || "")}</td>`,
             '</tr>',
           );
-          if (expanded) body.push(`<tr class="model-breakdown"><td colspan="12">${breakdown(bucketId)}</td></tr>`);
+          if (expanded) body.push(`<tr class="model-breakdown"><td colspan="13">${breakdown(bucketId)}</td></tr>`);
         });
         wrap.innerHTML = [
           '<table class="models-table">',
           '<thead><tr>',
           '<th>Model</th><th>Lab</th><th>Harness</th><th>API/Plan</th><th>Tier</th>',
           '<th class="numeric">Tasks</th><th class="numeric">First try</th><th class="numeric">Pass</th>',
-          '<th class="numeric">Tokens (median)</th><th>Speed (median)</th><th>Last used</th><th>Notes</th>',
+          '<th class="numeric">Tokens (median)</th><th class="numeric">Tokens (total)</th>',
+          '<th>Speed (median)</th><th>Last used</th><th>Notes</th>',
           '</tr></thead>',
           `<tbody>${body.join("")}</tbody>`,
           '</table>',
@@ -6113,6 +6115,7 @@ def aggregate_model_log_rows(
                 "first_try_pass_rate": 0.0,
                 "median_duration_ms": None,
                 "median_tokens": None,
+                "total_tokens": None,
                 "last_seen": "",
                 "_first_try_passed": 0,
                 "_duration_ms": [],
@@ -6125,6 +6128,20 @@ def aggregate_model_log_rows(
         logged_at = model_log_text(final.get("logged_at"))
         if logged_at > group["last_seen"]:
             group["last_seen"] = logged_at
+        # THE TOTAL COUNTS WHAT THE MEDIAN DELIBERATELY DOES NOT. Every token
+        # recorded against this model is spend, including the attempts excluded
+        # from scoring below: a run that died on startup says nothing about the
+        # model, but a run that burned 1.8M tokens before dying still drew on
+        # the budget, and a spend column that hid that would be answering a
+        # different question than the one it appears to answer. Median is a
+        # quality statistic and excludes no-ops; total is a spend statistic and
+        # includes them. They are therefore NOT expected to satisfy
+        # `median x tasks ~ total`, and the Tasks column already shows the
+        # no-op count that explains the gap.
+        for row in ordered:
+            tokens = model_log_int(row.get("worker_tokens"))
+            if tokens is not None:
+                group["total_tokens"] = (group["total_tokens"] or 0) + tokens
         if not model_log_row_counts_toward_score(final):
             # Counted, never scored. Duration and tokens are excluded too - a
             # run that died on startup contributes a 4-second, zero-token
@@ -6174,6 +6191,7 @@ def aggregate_model_log_rows(
                 "first_try_pass_rate": group["first_try_pass_rate"],
                 "median_duration_ms": group["median_duration_ms"],
                 "median_tokens": group["median_tokens"],
+                "total_tokens": group["total_tokens"],
                 "last_seen": group["last_seen"],
             }
         )
@@ -6203,6 +6221,7 @@ MODEL_SCOREBOARD_COLUMNS = (
     "First try",
     "Pass",
     "Tokens (median)",
+    "Tokens (total)",
     "Speed (median)",
     "Last used",
     "Notes",
@@ -6373,11 +6392,17 @@ def load_model_identity_registry(path: Path | None = None) -> ModelIdentityRegis
             model_key = str(model_key_raw).strip()
             if not model_key:
                 continue
+            # ACCESS IS PER ROUTE, NOT PER ENGINE. One engine key can serve
+            # two billing routes - `cline` ran the free daily-quota model
+            # before the cline-free lane existed, and still carries those rows -
+            # so an engine-level access value would label historical free-tier
+            # runs as prepaid-pass spend. The engine value stays the default;
+            # a model may override it for its own route.
             identities[(engine, model_key)] = ModelIdentity(
                 model_display=model_log_text(raw_model.get("display")) or model_key,
                 lab=model_log_text(raw_model.get("lab")) or "(unknown)",
                 harness=harness,
-                access=access,
+                access=model_log_text(raw_model.get("access")) or access,
                 alias=bool(raw_model.get("alias", False)),
                 confidence=model_log_text(raw_model.get("confidence")),
                 source=model_log_text(raw_model.get("source")),
@@ -6446,6 +6471,7 @@ def row_identity_fields(row: dict[str, Any], registry: ModelIdentityRegistry) ->
             "access": meta.access if meta else "unknown",
             "alias": False,
             "last_verified": "",
+            "confidence": "",
             "unregistered": False,
             "misrouted": False,
             "identity_key": "",
@@ -6459,6 +6485,7 @@ def row_identity_fields(row: dict[str, Any], registry: ModelIdentityRegistry) ->
         "access": identity.access,
         "alias": identity.alias,
         "last_verified": identity.last_verified,
+        "confidence": identity.confidence,
         "unregistered": identity.unregistered,
         "misrouted": identity.misrouted,
         "identity_key": identity.canonical_model_key or model_log_text(row.get("model")),
@@ -7558,6 +7585,7 @@ def aggregate_model_scoreboard_rows(
                 "not_scored": 0,
                 "retries": 0,
                 "first_try_passed": 0,
+                "total_tokens": None,
                 "last_seen": "",
                 "_duration_ms": [],
                 "_tokens": [],
@@ -7577,6 +7605,13 @@ def aggregate_model_scoreboard_rows(
                 "last_seen": "",
             },
         )
+        # Every recorded token, scored or not - see the note in
+        # aggregate_model_log_rows for why the total and the median count
+        # different sets on purpose.
+        for row in ordered:
+            tokens = model_log_int(row.get("worker_tokens"))
+            if tokens is not None:
+                model_entry["total_tokens"] = (model_entry["total_tokens"] or 0) + tokens
         # Same rule as aggregate_model_log_rows. Patching only one aggregator
         # would leave the HTML scoreboard reporting the numbers the CLI table
         # had just stopped reporting.
@@ -7649,6 +7684,7 @@ def aggregate_model_scoreboard_rows(
                 "pass_rate": entry["passed"] / tasks_count if tasks_count else 0.0,
                 "median_duration_ms": median_int(entry["_duration_ms"]),
                 "median_tokens": median_int(entry["_tokens"]),
+                "total_tokens": entry["total_tokens"],
                 "last_seen": entry["last_seen"],
                 "task_types": breakdown_rows,
             }
@@ -8042,6 +8078,11 @@ MODEL_SCOREBOARD_CSS = """
     color: var(--muted);
     font-size: 11px;
   }
+  /* An unverified entry must not read at a glance like a verified one. */
+  .verified-date.unverified {
+    font-style: italic;
+    opacity: 0.85;
+  }
   .tier-badge {
     display: inline-flex;
     align-items: center;
@@ -8262,11 +8303,23 @@ def render_model_table_pair(
         if row.get("misrouted")
         else ""
     )
-    verified_date = (
-        f'<span class="verified-date">verified {html_escape(last_verified)}</span>'
-        if last_verified
-        else ""
-    )
+    # THE WORD "verified" IS A CLAIM, SO IT READS `confidence` AND NOT THE DATE.
+    # This badge printed "verified <date>" for any entry carrying a
+    # `last_verified` value, which was harmless only while every registry entry
+    # was also `confidence = "verified"`. The first honestly-unverified entries
+    # (the Open Engine lane models, whose labs are slug-derived and unchecked
+    # at source) made the page assert the opposite of what the registry says.
+    # `last_verified` means "when this was last looked at", which is worth
+    # showing either way - it is the WORD in front of it that has to be true.
+    if not last_verified:
+        verified_date = ""
+    elif str(row.get("confidence") or "") == "verified":
+        verified_date = f'<span class="verified-date">verified {html_escape(last_verified)}</span>'
+    else:
+        verified_date = (
+            '<span class="verified-date unverified">unverified · checked '
+            f'{html_escape(last_verified)}</span>'
+        )
     return f"""<tr class="model-row" id="model-{html_escape(sanitize_artifact_name(row_id))}">
       <td class="model-cell"><div class="model-name">{html_escape(model_display)}</div>{model_id_line}{unregistered_flag}{misrouted_flag}</td>
       <td>{html_escape(lab)}{verified_date}</td>
@@ -8277,12 +8330,13 @@ def render_model_table_pair(
       <td class="num rate-cell">{rate_cell_html(row.get("first_try_pass_rate"))}</td>
       <td class="num rate-cell">{rate_cell_html(row.get("pass_rate"))}</td>
       <td class="num">{html_escape(fmt_int(row.get("median_tokens"))) if row.get("median_tokens") is not None else ""}</td>
+      <td class="num">{html_escape(fmt_int(row.get("total_tokens"))) if row.get("total_tokens") is not None else ""}</td>
       <td>{html_escape(fmt_scoreboard_duration(row.get("median_duration_ms")))}</td>
       <td>{html_escape(humanized_log_date(row.get("last_seen")))}</td>
       <td class="notes-cell" title="{html_escape(notes_title)}">{html_escape(latest_note)}</td>
     </tr>
     <tr class="detail-row">
-      <td colspan="12">
+      <td colspan="13">
         <details class="model-detail">
           <summary>details for {html_escape(model_display)}</summary>
           <div class="detail-content">
@@ -8392,6 +8446,7 @@ def render_model_scoreboard_html(
             <th class="num">First try</th>
             <th class="num">Pass</th>
             <th class="num">Tokens (median)</th>
+            <th class="num">Tokens (total)</th>
             <th>Speed (median)</th>
             <th>Last used</th>
             <th>Notes</th>
@@ -8455,8 +8510,9 @@ def write_model_scoreboard_html(
 
 def print_model_log_table(path: Path, rows_read: int, skipped: int, groups: list[dict[str, Any]]) -> None:
     print(f"Model log: {path} ({rows_read} rows, {skipped} skipped lines)")
-    # Tasks widened from 7 to 18 to fit "6 (+197 no-op)".
-    widths = (32, 20, 18, 18, 10, 18, 10, 7, 15, 14, 14, 60)
+    # Tasks widened from 7 to 18 to fit "6 (+197 no-op)". Tokens (total) is 15
+    # wide because a long-running lane reaches nine figures with separators.
+    widths = (32, 20, 18, 18, 10, 18, 10, 7, 15, 15, 14, 14, 60)
     header = " | ".join(
         f"{name:<{width}}" for name, width in zip(MODEL_SCOREBOARD_COLUMNS, widths)
     )
@@ -8501,6 +8557,7 @@ def print_model_log_table(path: Path, rows_read: int, skipped: int, groups: list
             fmt_percent(group.get("first_try_pass_rate")) if scored else "",
             fmt_percent(group.get("pass_rate")) if scored else "",
             "" if group.get("median_tokens") is None else fmt_int(group.get("median_tokens")),
+            "" if group.get("total_tokens") is None else fmt_int(group.get("total_tokens")),
             fmt_scoreboard_duration(group.get("median_duration_ms")),
             humanized_log_date(group.get("last_seen")),
             shorten(str(group.get("latest_note") or ""), 60),

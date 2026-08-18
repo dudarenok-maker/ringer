@@ -91,11 +91,20 @@ display = "Known Model"
 lab = "Acme Lab"
 confidence = "verified"
 source = "fixture"
+last_verified = 2026-07-10
+
+[engines.opencode.models."openrouter/acme/provisional-model"]
+display = "Provisional Model"
+lab = "Acme Lab"
+confidence = "unverified"
+source = "fixture"
+last_verified = 2026-07-11
 """,
             encoding="utf-8",
         )
         rows = [
             attempt("known", "openrouter/acme/known-model"),
+            attempt("provisional", "openrouter/acme/provisional-model"),
             attempt("unknown", "openrouter/vendor/secret-model", task_type="research"),
             attempt("misroute-1", "openrouter/x-ai/grok-4.5"),
             attempt("misroute-2", "openrouter/x-ai/grok-4.5"),
@@ -192,6 +201,31 @@ source = "fixture"
         positions = [ringside_header.index(f">{column}<") for column in MODEL_SCOREBOARD_COLUMNS]
         self.assertEqual(sorted(positions), positions)
         self.assertEqual(list(MODEL_SCOREBOARD_COLUMNS), self.payload()["columns"])
+
+    def test_the_verified_badge_states_confidence_not_merely_a_date(self) -> None:
+        # "verified <date>" was printed for ANY entry carrying last_verified,
+        # which was harmless only while every registry entry also said
+        # confidence = "verified". The moment an honestly-unverified entry
+        # exists - a slug-derived lab nobody has checked at source - the page
+        # asserts the opposite of what the registry says, in the one column a
+        # reader consults to decide whether to trust the row.
+        #
+        # last_verified still shows either way: "when this was last looked at"
+        # is worth knowing. It is the WORD in front of it that must be true.
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                0, run_models_command(self.config, self.args(html=str(self.html_path)))
+            )
+        html = self.html_path.read_text(encoding="utf-8")
+        known = html[html.index("Known Model") :]
+        known = known[: known.index("</tr>")]
+        self.assertIn("verified 2026-07-10", known)
+        self.assertNotIn("unverified", known)
+
+        provisional = html[html.index("Provisional Model") :]
+        provisional = provisional[: provisional.index("</tr>")]
+        self.assertIn("unverified", provisional)
+        self.assertIn("2026-07-11", provisional, "the date still shows - only the claim changes")
 
     def test_chart_rows_hide_slugs_and_notes_are_fresh(self) -> None:
         output = io.StringIO()
