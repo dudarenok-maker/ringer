@@ -10,3 +10,12 @@ hud/dist/
 hud/gen/
 hud/icons/icon.iconset/
 *.log
+
+# Runtime state written into the repo root when RINGER_HOME points here.
+# `runs.jsonl` above is already ignored for the same reason; these are the rest
+# of that set, and a stray read model committed by accident is worse than the
+# log - it is a DERIVED cache that then disagrees with whatever log it lands next to.
+ringer.db
+ringer.db-shm
+ringer.db-wal
+active-runs.json
