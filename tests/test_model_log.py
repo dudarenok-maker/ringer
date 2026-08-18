@@ -588,6 +588,94 @@ class CountsTowardScoreTests(unittest.TestCase):
         group = aggregate_model_log_rows(rows, task_type="ops")[0]
         self.assertEqual(group["total_tokens"], 0)
 
+    def test_the_token_breakdown_sums_and_reconciles_with_the_total(self) -> None:
+        # WHY THE BREAKDOWN EXISTS. `worker_tokens` is input + output + cache
+        # read + cache write, and cache reads dominate an agent run - 9.5M of
+        # one lane's 22.3M on 2026-08-18. Read against a stated 15M/day cap the
+        # total said 140% while that lane was still succeeding at 5/5, because
+        # the cap does not count the cached half. The non-cached figure said
+        # 85%, which matched reality. A single roll-up cannot answer "how much
+        # of my cap is left"; these columns can.
+        rows = [
+            {
+                "worker_engine": "cline",
+                "model": "deepseek/deepseek-v4-flash",
+                "task_type": "ops",
+                "run_id": "r1",
+                "task_key": "r1",
+                "verdict": "PASS",
+                "duration_ms": 1000,
+                "worker_tokens": 1_000,
+                "worker_tokens_input": 600,
+                "worker_tokens_output": 100,
+                "worker_tokens_cache_read": 250,
+                "worker_tokens_cache_write": 50,
+                "logged_at": "2026-08-18T10:00:00+00:00",
+            },
+            {
+                "worker_engine": "cline",
+                "model": "deepseek/deepseek-v4-flash",
+                "task_type": "ops",
+                "run_id": "r2",
+                "task_key": "r2",
+                "verdict": "PASS",
+                "duration_ms": 1000,
+                "worker_tokens": 500,
+                "worker_tokens_input": 300,
+                "worker_tokens_output": 50,
+                "worker_tokens_cache_read": 150,
+                "worker_tokens_cache_write": 0,
+                "logged_at": "2026-08-18T11:00:00+00:00",
+            },
+        ]
+        group = aggregate_model_log_rows(rows, task_type="ops")[0]
+        self.assertEqual(group["total_input"], 900)
+        self.assertEqual(group["total_output"], 150)
+        self.assertEqual(group["total_cache_read"], 400)
+        self.assertEqual(group["total_cache_write"], 50)
+        # The parts must add up to the roll-up, or one of the two is lying.
+        self.assertEqual(
+            group["total_tokens"],
+            group["total_input"] + group["total_output"]
+            + group["total_cache_read"] + group["total_cache_write"],
+        )
+        # The rollup aggregator feeds the HTML and Ringside surfaces; the other
+        # feeds the CLI. Patching one and not the other is the failure this
+        # file already carries a warning about.
+        rolled = aggregate_model_scoreboard_rows(rows, task_type="ops")[0]
+        for field in ("total_input", "total_output", "total_cache_read", "total_cache_write"):
+            self.assertEqual(rolled[field], group[field], field)
+
+    def test_the_breakdown_is_blank_not_zero_when_unreported(self) -> None:
+        # Most engines report no usage breakdown at all. Zero would claim they
+        # ran for free; blank says nothing was measured - the same line the
+        # median and total columns already draw.
+        rows = [
+            {
+                "worker_engine": "copilot",
+                "model": "auto",
+                "task_type": "ops",
+                "run_id": "r1",
+                "task_key": "r1",
+                "verdict": "PASS",
+                "duration_ms": 1000,
+                "worker_tokens": 42,
+                "logged_at": "2026-08-18T10:00:00+00:00",
+            }
+        ]
+        group = aggregate_model_log_rows(rows, task_type="ops")[0]
+        self.assertEqual(group["total_tokens"], 42)
+        for field in ("total_input", "total_output", "total_cache_read", "total_cache_write"):
+            self.assertIsNone(group[field], field)
+
+    def test_cached_column_combines_read_and_write(self) -> None:
+        from ringer import scoreboard_cached_tokens
+        self.assertEqual(scoreboard_cached_tokens({"total_cache_read": 400, "total_cache_write": 50}), 450)
+        # A recorded zero on one side is still a measurement.
+        self.assertEqual(scoreboard_cached_tokens({"total_cache_read": 400, "total_cache_write": None}), 400)
+        # Nothing recorded at all stays blank rather than becoming 0.
+        self.assertIsNone(scoreboard_cached_tokens({"total_cache_read": None, "total_cache_write": None}))
+
     def test_a_group_that_never_scored_reports_no_rate(self) -> None:
         rows = [row for row in self._rows() if row.get("counts_toward_score") is False]
         group = aggregate_model_log_rows(rows, task_type="ops")[0]

@@ -5167,6 +5167,22 @@ def inject_models_tab_into_ringside_html(html: str) -> str:
         return Number.isFinite(number) ? number : 0;
       }
 
+      // Blank when nothing was recorded, NOT zero - a printed 0 claims a
+      // measurement that never happened, and these columns are blank for every
+      // engine whose CLI reports no usage at all.
+      function tokenCell(value) {
+        if (value === null || value === undefined) return "";
+        return numberOrZeroLocal(value).toLocaleString();
+      }
+
+      // Cache reads plus writes, matching the Python side's one definition.
+      function cachedTokens(row) {
+        const r = row.total_cache_read;
+        const w = row.total_cache_write;
+        if ((r === null || r === undefined) && (w === null || w === undefined)) return null;
+        return numberOrZeroLocal(r) + numberOrZeroLocal(w);
+      }
+
       function percent(value) {
         const number = Number(value);
         return Number.isFinite(number) ? `${Math.round(number * 100)}%` : "0%";
@@ -5262,12 +5278,15 @@ def inject_models_tab_into_ringside_html(html: str) -> str:
             `<td class="numeric">${html(percent(row.pass_rate))}</td>`,
             `<td class="numeric">${row.median_tokens === null || row.median_tokens === undefined ? "" : numberOrZeroLocal(row.median_tokens).toLocaleString()}</td>`,
             `<td class="numeric">${row.total_tokens === null || row.total_tokens === undefined ? "" : numberOrZeroLocal(row.total_tokens).toLocaleString()}</td>`,
+            `<td class="numeric">${tokenCell(row.total_input)}</td>`,
+            `<td class="numeric">${tokenCell(row.total_output)}</td>`,
+            `<td class="numeric">${tokenCell(cachedTokens(row))}</td>`,
             `<td>${html(modelDuration(row.median_duration_ms))}</td>`,
             `<td>${html(modelDate(row.last_seen))}</td>`,
             `<td class="model-notes" title="${html(notes)}">${html(row.latest_note || "")}</td>`,
             '</tr>',
           );
-          if (expanded) body.push(`<tr class="model-breakdown"><td colspan="13">${breakdown(bucketId)}</td></tr>`);
+          if (expanded) body.push(`<tr class="model-breakdown"><td colspan="16">${breakdown(bucketId)}</td></tr>`);
         });
         wrap.innerHTML = [
           '<table class="models-table">',
@@ -5275,6 +5294,7 @@ def inject_models_tab_into_ringside_html(html: str) -> str:
           '<th>Model</th><th>Lab</th><th>Harness</th><th>API/Plan</th><th>Tier</th>',
           '<th class="numeric">Tasks</th><th class="numeric">First try</th><th class="numeric">Pass</th>',
           '<th class="numeric">Tokens (median)</th><th class="numeric">Tokens (total)</th>',
+          '<th class="numeric">In</th><th class="numeric">Out</th><th class="numeric">Cached</th>',
           '<th>Speed (median)</th><th>Last used</th><th>Notes</th>',
           '</tr></thead>',
           `<tbody>${body.join("")}</tbody>`,
@@ -6116,6 +6136,10 @@ def aggregate_model_log_rows(
                 "median_duration_ms": None,
                 "median_tokens": None,
                 "total_tokens": None,
+                "total_input": None,
+                "total_output": None,
+                "total_cache_read": None,
+                "total_cache_write": None,
                 "last_seen": "",
                 "_first_try_passed": 0,
                 "_duration_ms": [],
@@ -6142,6 +6166,17 @@ def aggregate_model_log_rows(
             tokens = model_log_int(row.get("worker_tokens"))
             if tokens is not None:
                 group["total_tokens"] = (group["total_tokens"] or 0) + tokens
+            # The breakdown follows the same rule as the total: every recorded
+            # value counts, scored or not, because it is all spend.
+            for _src, _dst in (
+                ("worker_tokens_input", "total_input"),
+                ("worker_tokens_output", "total_output"),
+                ("worker_tokens_cache_read", "total_cache_read"),
+                ("worker_tokens_cache_write", "total_cache_write"),
+            ):
+                part = model_log_int(row.get(_src))
+                if part is not None:
+                    group[_dst] = (group[_dst] or 0) + part
         if not model_log_row_counts_toward_score(final):
             # Counted, never scored. Duration and tokens are excluded too - a
             # run that died on startup contributes a 4-second, zero-token
@@ -6192,6 +6227,10 @@ def aggregate_model_log_rows(
                 "median_duration_ms": group["median_duration_ms"],
                 "median_tokens": group["median_tokens"],
                 "total_tokens": group["total_tokens"],
+                "total_input": group["total_input"],
+                "total_output": group["total_output"],
+                "total_cache_read": group["total_cache_read"],
+                "total_cache_write": group["total_cache_write"],
                 "last_seen": group["last_seen"],
             }
         )
@@ -6222,6 +6261,9 @@ MODEL_SCOREBOARD_COLUMNS = (
     "Pass",
     "Tokens (median)",
     "Tokens (total)",
+    "In",
+    "Out",
+    "Cached",
     "Speed (median)",
     "Last used",
     "Notes",
@@ -6685,6 +6727,10 @@ def create_read_model_schema(conn: Any) -> None:
             verdict TEXT,
             duration_ms INTEGER,
             worker_tokens INTEGER,
+            worker_tokens_input INTEGER,
+            worker_tokens_output INTEGER,
+            worker_tokens_cache_read INTEGER,
+            worker_tokens_cache_write INTEGER,
             counts_toward_score INTEGER,
             orchestrator TEXT
         );
@@ -6748,6 +6794,19 @@ def create_read_model_schema(conn: Any) -> None:
     # older database gives for a row that predates the field.
     if not read_model_column_exists(conn, "attempts", "counts_toward_score"):
         conn.execute("ALTER TABLE attempts ADD COLUMN counts_toward_score INTEGER")
+    # The token BREAKDOWN, same additive rule. `worker_tokens` is the roll-up of
+    # these; cache reads dominate an agent run and are usually not what a
+    # provider meters, so the single total answers "how big was this run" but
+    # not "how much of my cap is left". NULL here means the producer did not
+    # report a breakdown, which is what every row predating this says.
+    for _column in (
+        "worker_tokens_input",
+        "worker_tokens_output",
+        "worker_tokens_cache_read",
+        "worker_tokens_cache_write",
+    ):
+        if not read_model_column_exists(conn, "attempts", _column):
+            conn.execute(f"ALTER TABLE attempts ADD COLUMN {_column} INTEGER")
     if not read_model_column_exists(conn, "identity", "lab"):
         conn.execute("ALTER TABLE identity ADD COLUMN lab TEXT")
     if not read_model_column_exists(conn, "identity", "alias"):
@@ -6853,6 +6912,10 @@ def insert_attempt_rows(conn: Any, rows: list[dict[str, Any]]) -> int:
                 model_log_text(row.get("verdict")),
                 model_log_int(row.get("duration_ms")),
                 model_log_int(row.get("worker_tokens")),
+                model_log_int(row.get("worker_tokens_input")),
+                model_log_int(row.get("worker_tokens_output")),
+                model_log_int(row.get("worker_tokens_cache_read")),
+                model_log_int(row.get("worker_tokens_cache_write")),
                 1 if model_log_row_counts_toward_score(row) else 0,
                 model_log_text(row.get("orchestrator")),
             )
@@ -6863,9 +6926,12 @@ def insert_attempt_rows(conn: Any, rows: list[dict[str, Any]]) -> int:
             INSERT INTO attempts (
                 run_id, task_key, logged_at, engine, model, reported_model, expected_model,
                 reasoning_effort, task_type, retry,
-                verdict, duration_ms, worker_tokens, counts_toward_score, orchestrator
+                verdict, duration_ms, worker_tokens,
+                worker_tokens_input, worker_tokens_output,
+                worker_tokens_cache_read, worker_tokens_cache_write,
+                counts_toward_score, orchestrator
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             payloads,
         )
@@ -7179,7 +7245,10 @@ def db_attempt_rows(
         query = """
             SELECT run_id, task_key, logged_at, engine, model, reported_model, expected_model,
                    reasoning_effort, task_type, retry,
-                   verdict, duration_ms, worker_tokens, counts_toward_score, orchestrator
+                   verdict, duration_ms, worker_tokens,
+                   worker_tokens_input, worker_tokens_output,
+                   worker_tokens_cache_read, worker_tokens_cache_write,
+                   counts_toward_score, orchestrator
             FROM attempts
         """
         params: list[Any] = []
@@ -7202,6 +7271,10 @@ def db_attempt_rows(
                 "verdict": row["verdict"],
                 "duration_ms": row["duration_ms"],
                 "worker_tokens": row["worker_tokens"],
+                "worker_tokens_input": row["worker_tokens_input"],
+                "worker_tokens_output": row["worker_tokens_output"],
+                "worker_tokens_cache_read": row["worker_tokens_cache_read"],
+                "worker_tokens_cache_write": row["worker_tokens_cache_write"],
                 # NULL means the row predates the column, which must read as
                 # "counts" - the same answer the JSONL path gives for a row
                 # with no such field.
@@ -7586,6 +7659,10 @@ def aggregate_model_scoreboard_rows(
                 "retries": 0,
                 "first_try_passed": 0,
                 "total_tokens": None,
+                "total_input": None,
+                "total_output": None,
+                "total_cache_read": None,
+                "total_cache_write": None,
                 "last_seen": "",
                 "_duration_ms": [],
                 "_tokens": [],
@@ -7612,6 +7689,15 @@ def aggregate_model_scoreboard_rows(
             tokens = model_log_int(row.get("worker_tokens"))
             if tokens is not None:
                 model_entry["total_tokens"] = (model_entry["total_tokens"] or 0) + tokens
+            for _src, _dst in (
+                ("worker_tokens_input", "total_input"),
+                ("worker_tokens_output", "total_output"),
+                ("worker_tokens_cache_read", "total_cache_read"),
+                ("worker_tokens_cache_write", "total_cache_write"),
+            ):
+                part = model_log_int(row.get(_src))
+                if part is not None:
+                    model_entry[_dst] = (model_entry[_dst] or 0) + part
         # Same rule as aggregate_model_log_rows. Patching only one aggregator
         # would leave the HTML scoreboard reporting the numbers the CLI table
         # had just stopped reporting.
@@ -7685,11 +7771,30 @@ def aggregate_model_scoreboard_rows(
                 "median_duration_ms": median_int(entry["_duration_ms"]),
                 "median_tokens": median_int(entry["_tokens"]),
                 "total_tokens": entry["total_tokens"],
+                "total_input": entry["total_input"],
+                "total_output": entry["total_output"],
+                "total_cache_read": entry["total_cache_read"],
+                "total_cache_write": entry["total_cache_write"],
                 "last_seen": entry["last_seen"],
                 "task_types": breakdown_rows,
             }
         )
     return finalized
+
+
+def scoreboard_cached_tokens(row: dict[str, Any]) -> int | None:
+    """Cache reads plus cache writes, as one "Cached" figure.
+
+    Split at the source because they are billed differently where they are
+    billed at all, but shown together: a fifth token column earns its width
+    only if a reader would act on it differently, and nothing here would.
+    Writes are zero on every row this was built against.
+    """
+    read = row.get("total_cache_read")
+    write = row.get("total_cache_write")
+    if read is None and write is None:
+        return None
+    return int(read or 0) + int(write or 0)
 
 
 def estimated_task_cost(row: dict[str, Any], catalog_model: dict[str, Any] | None) -> float | None:
@@ -8331,12 +8436,15 @@ def render_model_table_pair(
       <td class="num rate-cell">{rate_cell_html(row.get("pass_rate"))}</td>
       <td class="num">{html_escape(fmt_int(row.get("median_tokens"))) if row.get("median_tokens") is not None else ""}</td>
       <td class="num">{html_escape(fmt_int(row.get("total_tokens"))) if row.get("total_tokens") is not None else ""}</td>
+      <td class="num">{html_escape(fmt_int(row.get("total_input"))) if row.get("total_input") is not None else ""}</td>
+      <td class="num">{html_escape(fmt_int(row.get("total_output"))) if row.get("total_output") is not None else ""}</td>
+      <td class="num">{html_escape(fmt_int(scoreboard_cached_tokens(row))) if scoreboard_cached_tokens(row) is not None else ""}</td>
       <td>{html_escape(fmt_scoreboard_duration(row.get("median_duration_ms")))}</td>
       <td>{html_escape(humanized_log_date(row.get("last_seen")))}</td>
       <td class="notes-cell" title="{html_escape(notes_title)}">{html_escape(latest_note)}</td>
     </tr>
     <tr class="detail-row">
-      <td colspan="13">
+      <td colspan="16">
         <details class="model-detail">
           <summary>details for {html_escape(model_display)}</summary>
           <div class="detail-content">
@@ -8447,6 +8555,9 @@ def render_model_scoreboard_html(
             <th class="num">Pass</th>
             <th class="num">Tokens (median)</th>
             <th class="num">Tokens (total)</th>
+            <th class="num">In</th>
+            <th class="num">Out</th>
+            <th class="num">Cached</th>
             <th>Speed (median)</th>
             <th>Last used</th>
             <th>Notes</th>
@@ -8512,7 +8623,7 @@ def print_model_log_table(path: Path, rows_read: int, skipped: int, groups: list
     print(f"Model log: {path} ({rows_read} rows, {skipped} skipped lines)")
     # Tasks widened from 7 to 18 to fit "6 (+197 no-op)". Tokens (total) is 15
     # wide because a long-running lane reaches nine figures with separators.
-    widths = (32, 20, 18, 18, 10, 18, 10, 7, 15, 15, 14, 14, 60)
+    widths = (32, 20, 18, 18, 10, 18, 10, 7, 15, 15, 13, 11, 13, 14, 14, 60)
     header = " | ".join(
         f"{name:<{width}}" for name, width in zip(MODEL_SCOREBOARD_COLUMNS, widths)
     )
@@ -8558,6 +8669,9 @@ def print_model_log_table(path: Path, rows_read: int, skipped: int, groups: list
             fmt_percent(group.get("pass_rate")) if scored else "",
             "" if group.get("median_tokens") is None else fmt_int(group.get("median_tokens")),
             "" if group.get("total_tokens") is None else fmt_int(group.get("total_tokens")),
+            "" if group.get("total_input") is None else fmt_int(group.get("total_input")),
+            "" if group.get("total_output") is None else fmt_int(group.get("total_output")),
+            "" if group.get("total_cache_read") is None else fmt_int(scoreboard_cached_tokens(group)),
             fmt_scoreboard_duration(group.get("median_duration_ms")),
             humanized_log_date(group.get("last_seen")),
             shorten(str(group.get("latest_note") or ""), 60),
