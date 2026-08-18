@@ -5175,12 +5175,22 @@ def inject_models_tab_into_ringside_html(html: str) -> str:
         return numberOrZeroLocal(value).toLocaleString();
       }
 
-      // Cache reads plus writes, matching the Python side's one definition.
+      // Input the provider had to PROCESS: uncached input plus cache writes.
+      // Mirrors scoreboard_input_tokens on the Python side - raw input_tokens
+      // is ~2 per request on a cache-heavy engine and would read as "sent
+      // nothing".
+      function freshInputTokens(row) {
+        const i = row.total_input;
+        const w = row.total_cache_write;
+        if ((i === null || i === undefined) && (w === null || w === undefined)) return null;
+        return numberOrZeroLocal(i) + numberOrZeroLocal(w);
+      }
+
+      // Input served FROM cache - reads only. Writes sit with fresh input.
       function cachedTokens(row) {
         const r = row.total_cache_read;
-        const w = row.total_cache_write;
-        if ((r === null || r === undefined) && (w === null || w === undefined)) return null;
-        return numberOrZeroLocal(r) + numberOrZeroLocal(w);
+        if (r === null || r === undefined) return null;
+        return numberOrZeroLocal(r);
       }
 
       function percent(value) {
@@ -5278,7 +5288,7 @@ def inject_models_tab_into_ringside_html(html: str) -> str:
             `<td class="numeric">${html(percent(row.pass_rate))}</td>`,
             `<td class="numeric">${row.median_tokens === null || row.median_tokens === undefined ? "" : numberOrZeroLocal(row.median_tokens).toLocaleString()}</td>`,
             `<td class="numeric">${row.total_tokens === null || row.total_tokens === undefined ? "" : numberOrZeroLocal(row.total_tokens).toLocaleString()}</td>`,
-            `<td class="numeric">${tokenCell(row.total_input)}</td>`,
+            `<td class="numeric">${tokenCell(freshInputTokens(row))}</td>`,
             `<td class="numeric">${tokenCell(row.total_output)}</td>`,
             `<td class="numeric">${tokenCell(cachedTokens(row))}</td>`,
             `<td>${html(modelDuration(row.median_duration_ms))}</td>`,
@@ -7782,19 +7792,42 @@ def aggregate_model_scoreboard_rows(
     return finalized
 
 
-def scoreboard_cached_tokens(row: dict[str, Any]) -> int | None:
-    """Cache reads plus cache writes, as one "Cached" figure.
+def scoreboard_input_tokens(row: dict[str, Any]) -> int | None:
+    """Input the provider actually had to PROCESS: uncached input + cache writes.
 
-    Split at the source because they are billed differently where they are
-    billed at all, but shown together: a fifth token column earns its width
-    only if a reader would act on it differently, and nothing here would.
-    Writes are zero on every row this was built against.
+    NOT the raw `input_tokens` field, and the difference is four orders of
+    magnitude on some engines. Anthropic reports `input_tokens` as only the
+    part no cache breakpoint covered, so a tool loop with a cached prefix
+    reports about two tokens per request - one real claude run reads
+    `in=276, cacheWrite=196,277` across 138 calls. Showing 276 as "In" says the
+    lane sent nothing, when it sent 196k of fresh prompt that the provider both
+    processed and stored.
+
+    A cache WRITE is fresh input by definition: the provider read those tokens
+    for the first time and kept them. Counting it here makes the column mean
+    the same thing on every engine - cline reports its uncached prompt in
+    `inputTokens` and writes nothing, claude reports almost all of it as cache
+    creation - and makes the figure comparable across lanes, which raw
+    `input_tokens` is not.
+    """
+    fresh = row.get("total_input")
+    write = row.get("total_cache_write")
+    if fresh is None and write is None:
+        return None
+    return int(fresh or 0) + int(write or 0)
+
+
+def scoreboard_cached_tokens(row: dict[str, Any]) -> int | None:
+    """Input served FROM cache - reads only.
+
+    Cache writes belong with fresh input above, not here: they are the
+    expensive half. Reads are the cheap half and are usually not what a quota
+    meters, which is the whole reason these columns exist.
     """
     read = row.get("total_cache_read")
-    write = row.get("total_cache_write")
-    if read is None and write is None:
+    if read is None:
         return None
-    return int(read or 0) + int(write or 0)
+    return int(read)
 
 
 def estimated_task_cost(row: dict[str, Any], catalog_model: dict[str, Any] | None) -> float | None:
@@ -8436,7 +8469,7 @@ def render_model_table_pair(
       <td class="num rate-cell">{rate_cell_html(row.get("pass_rate"))}</td>
       <td class="num">{html_escape(fmt_int(row.get("median_tokens"))) if row.get("median_tokens") is not None else ""}</td>
       <td class="num">{html_escape(fmt_int(row.get("total_tokens"))) if row.get("total_tokens") is not None else ""}</td>
-      <td class="num">{html_escape(fmt_int(row.get("total_input"))) if row.get("total_input") is not None else ""}</td>
+      <td class="num">{html_escape(fmt_int(scoreboard_input_tokens(row))) if scoreboard_input_tokens(row) is not None else ""}</td>
       <td class="num">{html_escape(fmt_int(row.get("total_output"))) if row.get("total_output") is not None else ""}</td>
       <td class="num">{html_escape(fmt_int(scoreboard_cached_tokens(row))) if scoreboard_cached_tokens(row) is not None else ""}</td>
       <td>{html_escape(fmt_scoreboard_duration(row.get("median_duration_ms")))}</td>
@@ -8669,7 +8702,7 @@ def print_model_log_table(path: Path, rows_read: int, skipped: int, groups: list
             fmt_percent(group.get("pass_rate")) if scored else "",
             "" if group.get("median_tokens") is None else fmt_int(group.get("median_tokens")),
             "" if group.get("total_tokens") is None else fmt_int(group.get("total_tokens")),
-            "" if group.get("total_input") is None else fmt_int(group.get("total_input")),
+            "" if scoreboard_input_tokens(group) is None else fmt_int(scoreboard_input_tokens(group)),
             "" if group.get("total_output") is None else fmt_int(group.get("total_output")),
             "" if group.get("total_cache_read") is None else fmt_int(scoreboard_cached_tokens(group)),
             fmt_scoreboard_duration(group.get("median_duration_ms")),

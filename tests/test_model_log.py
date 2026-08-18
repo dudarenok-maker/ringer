@@ -668,13 +668,48 @@ class CountsTowardScoreTests(unittest.TestCase):
         for field in ("total_input", "total_output", "total_cache_read", "total_cache_write"):
             self.assertIsNone(group[field], field)
 
-    def test_cached_column_combines_read_and_write(self) -> None:
-        from ringer import scoreboard_cached_tokens
-        self.assertEqual(scoreboard_cached_tokens({"total_cache_read": 400, "total_cache_write": 50}), 450)
-        # A recorded zero on one side is still a measurement.
-        self.assertEqual(scoreboard_cached_tokens({"total_cache_read": 400, "total_cache_write": None}), 400)
-        # Nothing recorded at all stays blank rather than becoming 0.
-        self.assertIsNone(scoreboard_cached_tokens({"total_cache_read": None, "total_cache_write": None}))
+    def test_a_cache_write_counts_as_fresh_input_not_as_cache(self) -> None:
+        # THE GROUPING THAT WAS WRONG FIRST TIME. Anthropic reports
+        # `input_tokens` as only the part no cache breakpoint covered, so a
+        # claude tool loop reads about two tokens per request: one real run
+        # recorded in=276 against cacheWrite=196,277 over 138 calls. Showing
+        # 276 as "In" said the lane sent nothing, when it had sent 196k of
+        # fresh prompt. A cache WRITE is fresh input by definition - the
+        # provider read those tokens for the first time and kept them.
+        from ringer import scoreboard_cached_tokens, scoreboard_input_tokens
+        claude_shaped = {"total_input": 276, "total_cache_write": 196_277, "total_cache_read": 11_424_250}
+        self.assertEqual(scoreboard_input_tokens(claude_shaped), 196_553)
+        self.assertEqual(scoreboard_cached_tokens(claude_shaped), 11_424_250)
+        # THE CONTROL: the raw field alone is the number that misled, so assert
+        # the column is NOT it.
+        self.assertNotEqual(scoreboard_input_tokens(claude_shaped), 276)
+
+        # And the column means the same thing on an engine that reports its
+        # uncached prompt in `input` and writes nothing - which is the point of
+        # regrouping rather than relabelling.
+        cline_shaped = {"total_input": 884_495, "total_cache_write": 0, "total_cache_read": 814_336}
+        self.assertEqual(scoreboard_input_tokens(cline_shaped), 884_495)
+        self.assertEqual(scoreboard_cached_tokens(cline_shaped), 814_336)
+
+        # Nothing recorded stays blank rather than becoming 0.
+        self.assertIsNone(scoreboard_input_tokens({"total_input": None, "total_cache_write": None}))
+        self.assertIsNone(scoreboard_cached_tokens({"total_cache_read": None}))
+
+    def test_the_three_columns_still_sum_to_the_total(self) -> None:
+        # The regrouping moved a component between columns; it must not have
+        # lost or duplicated one. In + Out + Cached has to reproduce the
+        # roll-up on both engine shapes.
+        from ringer import scoreboard_cached_tokens, scoreboard_input_tokens
+        for shape in (
+            {"total_input": 276, "total_output": 65_445, "total_cache_write": 196_277, "total_cache_read": 11_424_250},
+            {"total_input": 884_495, "total_output": 32_154, "total_cache_write": 0, "total_cache_read": 814_336},
+        ):
+            total = sum(int(shape[k] or 0) for k in
+                        ("total_input", "total_output", "total_cache_read", "total_cache_write"))
+            self.assertEqual(
+                total,
+                scoreboard_input_tokens(shape) + int(shape["total_output"]) + scoreboard_cached_tokens(shape),
+            )
 
     def test_a_group_that_never_scored_reports_no_rate(self) -> None:
         rows = [row for row in self._rows() if row.get("counts_toward_score") is False]
