@@ -23,6 +23,7 @@ from ringer import (  # noqa: E402
     VerifyResult,
     WorkerResult,
     aggregate_model_log_rows,
+    model_log_row_counts_toward_score,
     model_log_row_is_retry,
     read_model_log_rows,
 )
@@ -332,3 +333,146 @@ class ModelLogTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class CountsTowardScoreTests(unittest.TestCase):
+    """A run the worker never got to start is not evidence about the model.
+
+    The case this exists for: a lane whose CLI exits in four seconds because
+    the account is out of credit, relaunched every five minutes for eleven
+    hours. Scored as failed tasks those 197 runs reported a 3% pass rate for a
+    model that had passed almost everything it was able to begin.
+    """
+
+    def test_absent_field_counts(self) -> None:
+        # Every producer today omits it. Omission must never exclude a row, or
+        # this field would silently rewrite history the day it was added.
+        self.assertTrue(model_log_row_counts_toward_score({}))
+
+    def test_explicit_false_excludes(self) -> None:
+        self.assertFalse(model_log_row_counts_toward_score({"counts_toward_score": False}))
+
+    def test_explicit_true_counts(self) -> None:
+        self.assertTrue(model_log_row_counts_toward_score({"counts_toward_score": True}))
+
+    def test_json_string_and_number_forms(self) -> None:
+        for value in ("false", "False", " FALSE ", "0", "no"):
+            self.assertFalse(
+                model_log_row_counts_toward_score({"counts_toward_score": value}), value
+            )
+        for value in ("true", "1", "yes", 1, 2.5):
+            self.assertTrue(
+                model_log_row_counts_toward_score({"counts_toward_score": value}), value
+            )
+
+    def test_unparseable_value_counts_rather_than_vanishing(self) -> None:
+        # A typo must leave the row in the score, not quietly remove it. The
+        # failure mode of the opposite default is invisible: rows disappear and
+        # the rate silently improves.
+        self.assertTrue(model_log_row_counts_toward_score({"counts_toward_score": {"x": 1}}))
+        self.assertTrue(model_log_row_counts_toward_score({"counts_toward_score": None}))
+
+    def _rows(self) -> list[dict[str, object]]:
+        base = {
+            "worker_engine": "claude",
+            "model": "claude-sonnet-5",
+            "task_type": "ops",
+        }
+        rows: list[dict[str, object]] = [
+            {
+                **base,
+                "run_id": "real1",
+                "task_key": "real1",
+                "verdict": "PASS",
+                "duration_ms": 900_000,
+                "worker_tokens": 3_000_000,
+                "logged_at": "2026-08-17T16:25:00+00:00",
+            },
+            {
+                **base,
+                "run_id": "real2",
+                "task_key": "real2",
+                "verdict": "FAIL",
+                "duration_ms": 700_000,
+                "worker_tokens": 1_000_000,
+                "logged_at": "2026-08-17T17:25:00+00:00",
+            },
+        ]
+        # Six dead launches: four seconds each, zero tokens, never started.
+        for i in range(6):
+            rows.append(
+                {
+                    **base,
+                    "run_id": f"dead{i}",
+                    "task_key": f"dead{i}",
+                    "verdict": "FAIL",
+                    "duration_ms": 4_400,
+                    "worker_tokens": 0,
+                    "counts_toward_score": False,
+                    "logged_at": f"2026-08-17T1{i}:00:00+00:00",
+                }
+            )
+        return rows
+
+    def test_no_op_rows_are_counted_but_not_scored(self) -> None:
+        groups = aggregate_model_log_rows(self._rows(), task_type="ops")
+        self.assertEqual(len(groups), 1)
+        group = groups[0]
+        self.assertEqual(group["tasks"], 2, "scored tasks must exclude the dead launches")
+        self.assertEqual(group["not_scored"], 6, "dead launches must still be visible")
+        self.assertEqual(group["passed"], 1)
+        self.assertEqual(group["failed"], 1)
+        self.assertAlmostEqual(group["pass_rate"], 0.5)
+
+    def test_medians_exclude_no_op_rows(self) -> None:
+        # This is half the point. Six 4-second, zero-token samples drag both
+        # medians to a number no real run ever produced - the observed symptom
+        # was a blank/zero Tokens column and a 4s median speed for a lane whose
+        # real runs take twenty minutes.
+        group = aggregate_model_log_rows(self._rows(), task_type="ops")[0]
+        self.assertEqual(group["median_tokens"], 2_000_000)
+        self.assertEqual(group["median_duration_ms"], 800_000)
+
+    def test_without_the_field_the_same_rows_score_the_old_way(self) -> None:
+        # The control. Strip the marks and the aggregate must go back to what
+        # it was, or this is measuring the fixture rather than the feature.
+        rows = [
+            {k: v for k, v in row.items() if k != "counts_toward_score"}
+            for row in self._rows()
+        ]
+        group = aggregate_model_log_rows(rows, task_type="ops")[0]
+        self.assertEqual(group["tasks"], 8)
+        self.assertEqual(group["not_scored"], 0)
+        self.assertAlmostEqual(group["pass_rate"], 1 / 8)
+        self.assertEqual(group["median_tokens"], 0)
+
+    def test_last_seen_still_reflects_no_op_runs(self) -> None:
+        # A lane that spent all week unable to start has still been running.
+        # Showing it as untouched since last month would be its own lie.
+        rows = self._rows()
+        rows.append(
+            {
+                "worker_engine": "claude",
+                "model": "claude-sonnet-5",
+                "task_type": "ops",
+                "run_id": "dead-late",
+                "task_key": "dead-late",
+                "verdict": "FAIL",
+                "duration_ms": 4_400,
+                "worker_tokens": 0,
+                "counts_toward_score": False,
+                "logged_at": "2026-08-18T09:00:00+00:00",
+            }
+        )
+        group = aggregate_model_log_rows(rows, task_type="ops")[0]
+        self.assertEqual(group["last_seen"], "2026-08-18T09:00:00+00:00")
+
+    def test_a_group_that_never_scored_reports_no_rate(self) -> None:
+        rows = [row for row in self._rows() if row.get("counts_toward_score") is False]
+        group = aggregate_model_log_rows(rows, task_type="ops")[0]
+        self.assertEqual(group["tasks"], 0)
+        self.assertEqual(group["not_scored"], 6)
+        # The renderer blanks the rates when tasks == 0; the aggregate simply
+        # must not claim a pass rate it has no evidence for.
+        self.assertEqual(group["passed"], 0)
+        self.assertEqual(group["failed"], 0)
