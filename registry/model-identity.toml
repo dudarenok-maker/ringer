@@ -222,14 +222,20 @@ access = "Local (Ollama, unmetered)"
 default_model_key = "muse-glimmer-agent-64k:latest"
 
 [engines.copilot-muse.models."muse-glimmer-agent-64k:latest"]
-display = "Muse Glimmer 27B (agent 64k)"
-# LAB DELIBERATELY UNCLAIMED. The tag carries no publisher metadata and its
-# family string is just "muse-glimmer". Its sampling defaults (temp 1, top_k 64,
-# top_p 0.95) RESEMBLE Gemma's, and a resemblance is not a provenance -
-# recording a lab off it would be a guess wearing a citation.
-lab = "(unknown)"
-confidence = "unverified"
-source = "local build from library/muse-glimmer weights blob sha256-71b5c9c9, vision projector omitted"
+display = "Muse Glimmer 30B (agent 64k)"
+# WAS "(unknown)" UNTIL THE OPERATOR SUPPLIED THE SOURCE, and why it was unknown
+# is worth keeping. The Ollama tag carries no publisher metadata whatsoever and
+# the family string is just "muse-glimmer"; the only signal available locally
+# was its sampling defaults (temp 1, top_k 64, top_p 0.95), which RESEMBLE
+# Gemma's. Attributing off that would have recorded Google - confidently, and
+# wrongly. A resemblance is not a provenance.
+#
+# 30B is the publisher's figure and matches the parent tag muse-glimmer:30b.
+# Ollama reports parameter_size 27.9B for this quant; the two are the same model
+# counted differently, not a discrepancy to chase.
+lab = "Meta"
+confidence = "verified"
+source = "https://developer.meta.com/ai/lp/muse-glimmer/ - Meta, 30B params, Apache 2.0, an open model built for always-on local agents; this entry is a local build from the library/muse-glimmer weights blob sha256-71b5c9c9 with the vision projector omitted"
 last_verified = 2026-08-19
 
 [engines.copilot-qwen]
