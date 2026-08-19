@@ -199,34 +199,47 @@ last_verified = 2026-08-18
 harness = "GitHub Copilot CLI"
 access = "Copilot free plan"     # operator-confirmed; live probe 2026-08-15 refused reasoning effort on `auto`, which only the free plan forces
 
-[engines.copilot-local]
-# THE MIRROR IMAGE OF [engines.copilot] ABOVE, AND THE COMMENT THERE STILL
-# STANDS. That lane is unattributable because free-plan `auto` picks per
-# request; this one is attributable because BYOK cannot start without an
-# explicit model - the CLI exits "BYOK providers require an explicit model"
-# (observed 2026-08-19). The model reaches Ringer through `--model {model}` in
-# the args_template, which effective_model_from_command() reads straight back.
-# So a models block here is correct and a models block there is still not.
+# --- LOCAL LANES -------------------------------------------------------------
+# THE MIRROR IMAGE OF [engines.copilot] ABOVE, AND ITS COMMENT STILL STANDS.
+# That lane is unattributable because free-plan `auto` picks per request; these
+# are attributable because BYOK cannot start without an explicit model - the CLI
+# exits "BYOK providers require an explicit model" (observed 2026-08-19). The
+# model reaches Ringer through `--model {model}` in the args_template, which
+# effective_model_from_command() reads back. So a models block here is correct
+# and a models block there is still not.
+#
+# TWO ENGINES FOR TWO MODELS, on purpose. The Open Engine lane name IS the
+# engine key, and a ticket picks its lane from its title's second bracket, so
+# routing and reporting are one problem: a single local engine could only run
+# its own default and every row would be credited to that one model.
+#
+# Access is not a plan - these run on the operator's own GPUs. Kept distinct
+# from "unknown" so a blank Access cell still reads as a missing entry.
+
+[engines.copilot-muse]
 harness = "Copilot CLI (BYOK -> local Ollama)"
-# Not a plan at all: these run on the operator's own GPUs. Kept distinct from
-# "unknown" so a blank Access cell still reads as a missing entry, not as local.
 access = "Local (Ollama, unmetered)"
 default_model_key = "muse-glimmer-agent-64k:latest"
 
-[engines.copilot-local.models."muse-glimmer-agent-64k:latest"]
+[engines.copilot-muse.models."muse-glimmer-agent-64k:latest"]
 display = "Muse Glimmer 27B (agent 64k)"
-# LAB DELIBERATELY UNCLAIMED. The tag carries no publisher metadata and the
+# LAB DELIBERATELY UNCLAIMED. The tag carries no publisher metadata and its
 # family string is just "muse-glimmer". Its sampling defaults (temp 1, top_k 64,
-# top_p 0.95) resemble Gemma's, which is a RESEMBLANCE and not a provenance -
-# recording a lab off that would be a guess wearing a citation.
+# top_p 0.95) RESEMBLE Gemma's, and a resemblance is not a provenance -
+# recording a lab off it would be a guess wearing a citation.
 lab = "(unknown)"
 confidence = "unverified"
 source = "local build from library/muse-glimmer weights blob sha256-71b5c9c9, vision projector omitted"
 last_verified = 2026-08-19
 
-[engines.copilot-local.models."qwen38-agent-iq4:latest"]
+[engines.copilot-qwen]
+harness = "Copilot CLI (BYOK -> local Ollama)"
+access = "Local (Ollama, unmetered)"
+default_model_key = "qwen38-agent-iq4:latest"
+
+[engines.copilot-qwen.models."qwen38-agent-iq4:latest"]
 display = "Qwen3.8 27B (agent IQ4 64k)"
 lab = "Alibaba"
-confidence = "verified"     # provenance chain checked on box: batiai/qwen3.8-27b:iq4 -> parent qwen3.8:27b (Qwen family)
+confidence = "verified"     # provenance checked on box: batiai/qwen3.8-27b:iq4 -> parent qwen3.8:27b
 source = "ollama /api/tags parent_model=qwen3.8:27b; registry manifest batiai/qwen3.8-27b:iq4 = 15.08 GB, probed 2026-08-19"
 last_verified = 2026-08-19
