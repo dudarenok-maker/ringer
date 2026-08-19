@@ -24,6 +24,7 @@ from ringer import (  # noqa: E402
     WorkerResult,
     aggregate_model_log_rows,
     aggregate_model_scoreboard_rows,
+    load_model_identity_registry,
     model_log_row_counts_toward_score,
     model_log_row_is_retry,
     read_model_log_rows,
@@ -330,6 +331,114 @@ class ModelLogTests(unittest.TestCase):
             self.assertEqual(2, group["attempts"])
             self.assertEqual(0.0, group["first_try_pass_rate"])
             self.assertEqual(1.0, group["pass_rate"])
+
+
+class ScoreboardIdentityGroupingTests(unittest.TestCase):
+    """Two engine keys that resolve to ONE identity must render as ONE row.
+
+    The live case: the `cline` engine ran the free daily-quota deepseek model
+    before the `cline-free` lane was split out. Both resolve to the same
+    Model / Lab / Harness / API-Plan, so grouping on the raw engine produced
+    two rows identical in every visible column with different numbers - which
+    reads as the scoreboard being broken, because nothing on screen explains
+    the split.
+    """
+
+    REGISTRY = """
+[engines.alpha]
+harness = "Shared CLI"
+access = "Free tier"
+
+[engines.alpha.models."m/one"]
+display = "Model One"
+lab = "LabCo"
+
+[engines.beta]
+harness = "Shared CLI"
+access = "Free tier"
+
+[engines.beta.models."m/one"]
+display = "Model One"
+lab = "LabCo"
+
+[engines.gamma]
+harness = "Shared CLI"
+access = "Paid plan"
+
+[engines.gamma.models."m/one"]
+display = "Model One"
+lab = "LabCo"
+"""
+
+    def _registry(self):
+        tmp = Path(tempfile.mkdtemp()) / "model-identity.toml"
+        tmp.write_text(self.REGISTRY, encoding="utf-8")
+        return load_model_identity_registry(tmp)
+
+    def _rows(self):
+        def row(engine, key, verdict, tokens, when):
+            return {
+                "worker_engine": engine,
+                "model": "m/one",
+                "task_type": "ops",
+                "run_id": key,
+                "task_key": key,
+                "verdict": verdict,
+                "duration_ms": 60_000,
+                "worker_tokens": tokens,
+                "logged_at": when,
+            }
+
+        return [
+            row("alpha", "a1", "PASS", 100, "2026-08-17T10:00:00+00:00"),
+            row("beta", "b1", "FAIL", 200, "2026-08-17T11:00:00+00:00"),
+            # Same model and harness, DIFFERENT access - must stay its own row.
+            row("gamma", "g1", "PASS", 400, "2026-08-17T12:00:00+00:00"),
+        ]
+
+    def test_two_engines_one_identity_collapse_to_a_single_row(self) -> None:
+        groups = aggregate_model_log_rows(
+            self._rows(), task_type="ops", registry=self._registry()
+        )
+        free = [g for g in groups if g["model"] == "m/one"]
+        by_access = {}
+        for g in free:
+            ident = self._registry().resolve(g["engine"], g["model"])
+            by_access.setdefault(ident.access, []).append(g)
+        self.assertEqual(
+            len(by_access["Free tier"]),
+            1,
+            "alpha and beta resolve to one identity and must be one row",
+        )
+        merged = by_access["Free tier"][0]
+        self.assertEqual(merged["tasks"], 2, "both runs must be counted, not one")
+        self.assertEqual(merged["passed"], 1)
+        self.assertEqual(merged["failed"], 1)
+
+    def test_a_differing_access_still_keys_apart(self) -> None:
+        # THE CONTROL. Without it this suite would pass just as well if the key
+        # collapsed everything to one row, which is the opposite failure and a
+        # far worse one - it would hide real spend on a paid route inside a
+        # free-tier row.
+        groups = aggregate_model_log_rows(
+            self._rows(), task_type="ops", registry=self._registry()
+        )
+        self.assertEqual(len(groups), 2, f"expected free + paid, got {len(groups)}")
+
+    def test_without_a_registry_the_old_split_is_preserved(self) -> None:
+        # Backward compatibility is load-bearing: every other caller and test
+        # passes no registry and must keep the historical (engine, model) key.
+        groups = aggregate_model_log_rows(self._rows(), task_type="ops")
+        self.assertEqual(len(groups), 3, "three engines must stay three rows")
+
+    def test_the_scoreboard_rollup_merges_the_same_way(self) -> None:
+        # The two aggregators feed different surfaces; fixing one and not the
+        # other is how a table and its rollup start disagreeing.
+        rollup = aggregate_model_scoreboard_rows(
+            self._rows(), registry=self._registry()
+        )
+        self.assertEqual(len(rollup), 2)
+        self.assertEqual(sum(g["tasks"] for g in rollup), 3)
 
 
 if __name__ == "__main__":

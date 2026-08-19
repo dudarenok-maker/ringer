@@ -6089,13 +6089,52 @@ def read_model_log_rows(
     return rows, skipped
 
 
+def model_group_identity_key(
+    engine: str,
+    model: str,
+    registry: "ModelIdentityRegistry | None",
+) -> tuple[Any, ...]:
+    """The identity portion of a scoreboard grouping key.
+
+    TWO ENGINE KEYS CAN BE ONE ROUTE. The `cline` engine ran the free
+    daily-quota deepseek model before the `cline-free` lane was split out, so
+    its historical rows and cline-free's resolve to the same Model / Lab /
+    Harness / API-Plan. Grouping on the RAW engine rendered those as two rows
+    that are character-for-character identical in every visible column and
+    carry different numbers - which a reader can only read as the scoreboard
+    being broken, since nothing on screen explains the split.
+
+    Grouping on the RESOLVED identity merges exactly that case and nothing
+    else. Any pair differing in model, lab, harness or access still keys
+    apart: `cline` on the prepaid pass stays separate from `cline-free`
+    because their access differs, and access is the distinction that actually
+    governs spend. Measured against this box's own log before the change: 10
+    distinct (engine, model) keys collapse to 9 identities - one merge, the
+    intended one.
+
+    registry=None preserves the historical (engine, model) behaviour, so
+    callers without a registry - and the tests that pin the old shape - are
+    untouched.
+    """
+    if registry is None:
+        return (engine, model)
+    identity = registry.resolve(engine, model)
+    return (
+        identity.model_display,
+        identity.lab,
+        identity.harness,
+        identity.access,
+    )
+
+
 def aggregate_model_log_rows(
     rows: list[dict[str, Any]],
     *,
     task_type: str | None = None,
     model: str | None = None,
+    registry: "ModelIdentityRegistry | None" = None,
 ) -> list[dict[str, Any]]:
-    groups: dict[tuple[str, str, str, str, bool], dict[str, Any]] = {}
+    groups: dict[tuple[Any, ...], dict[str, Any]] = {}
     effort_keys = model_reasoning_effort_keys(rows)
     for task_rows in group_model_log_tasks(rows):
         ordered = sorted(
@@ -6119,8 +6158,7 @@ def aggregate_model_log_rows(
         if task_type is not None and group_task_type != task_type:
             continue
         key = (
-            group_engine,
-            group_model,
+            *model_group_identity_key(group_engine, group_model, registry),
             group_task_type,
             reasoning_effort or "",
             unattributed,
@@ -7626,8 +7664,9 @@ def aggregate_model_scoreboard_rows(
     *,
     task_type: str | None = None,
     model: str | None = None,
+    registry: "ModelIdentityRegistry | None" = None,
 ) -> list[dict[str, Any]]:
-    models: dict[tuple[str, str, str, bool], dict[str, Any]] = {}
+    models: dict[tuple[Any, ...], dict[str, Any]] = {}
     effort_keys = model_reasoning_effort_keys(rows)
     for task_rows in group_model_log_tasks(rows):
         ordered = sorted(
@@ -7650,7 +7689,11 @@ def aggregate_model_scoreboard_rows(
             continue
         if task_type is not None and group_task_type != task_type:
             continue
-        model_key = (group_engine, group_model, reasoning_effort or "", unattributed)
+        model_key = (
+            *model_group_identity_key(group_engine, group_model, registry),
+            reasoning_effort or "",
+            unattributed,
+        )
         model_entry = models.setdefault(
             model_key,
             {
@@ -8769,7 +8812,7 @@ def build_models_api_payload(
     notes_sections = parse_model_notes_sections(notes_path)
     groups = enrich_model_groups_with_notes(
         enrich_model_groups_with_identity(
-            aggregate_model_log_rows(rows),
+            aggregate_model_log_rows(rows, registry=identity_registry),
             rows,
             identity_registry,
             include_task_type=True,
@@ -8779,7 +8822,7 @@ def build_models_api_payload(
     )
     rollup = enrich_model_groups_with_notes(
         enrich_model_groups_with_identity(
-            aggregate_model_scoreboard_rows(rows),
+            aggregate_model_scoreboard_rows(rows, registry=identity_registry),
             rows,
             identity_registry,
             include_task_type=False,
@@ -8847,7 +8890,7 @@ def run_models_command(config: AppConfig, args: argparse.Namespace) -> int:
     notes_sections = parse_model_notes_sections(notes_path)
     groups = enrich_model_groups_with_notes(
         enrich_model_groups_with_identity(
-            aggregate_model_log_rows(rows, task_type=args.task_type, model=args.model),
+            aggregate_model_log_rows(rows, task_type=args.task_type, model=args.model, registry=identity_registry),
             rows,
             identity_registry,
             include_task_type=True,
@@ -8870,7 +8913,7 @@ def run_models_command(config: AppConfig, args: argparse.Namespace) -> int:
     if html_arg is not None or open_requested:
         scoreboard_rows = enrich_model_groups_with_notes(
             enrich_model_groups_with_identity(
-                aggregate_model_scoreboard_rows(rows, task_type=args.task_type, model=args.model),
+                aggregate_model_scoreboard_rows(rows, task_type=args.task_type, model=args.model, registry=identity_registry),
                 rows,
                 identity_registry,
                 include_task_type=False,
