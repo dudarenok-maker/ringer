@@ -100,19 +100,28 @@ source = "manifest model field; OpenRouter slug meta-llama/llama-3.3-70b-instruc
 last_verified = 2026-07-10
 
 # ---------------------------------------------------------------------------
-# The Open Engine worker lanes on this box. Five Ringer engine keys, three of
-# which are the SAME Cline runtime on three CONCURRENTLY AVAILABLE billing
-# routes - not a succession, three live budgets - which is exactly why `access`
-# is the column that separates them. Harness is identical for those three; only
-# the route differs, so nothing else in the row can tell them apart.
+# The Open Engine worker lanes on this box. SIX engine keys here are the SAME
+# Cline runtime on six CONCURRENTLY AVAILABLE routes - not a succession, six
+# live budgets - which is exactly why `access` is the column that separates
+# them. Harness is identical for all six; only the route differs, so nothing
+# else in the row can tell them apart.
 #
-#   cline       Cline Pass, prepaid balance
-#   cline-free  Cline free tier, hard daily quota
-#   cline-glm   glm-5.2 on BytePlus ARK, Lite package
+#   cline             Cline Pass, prepaid balance
+#   cline-free        Cline free tier, hard daily quota
+#   cline-glm         glm-5.2 on BytePlus ARK, Lite package
+#   cline-qwen-cloud  qwen3.7-max on the operator's Alibaba MaaS token plan
+#   cline-qwen-local  qwen38-agent-iq4 on this box's own Ollama, unmetered
+#   cline-muse-local  muse-glimmer-agent-64k on the same Ollama, unmetered
 #
-# Access values are operator-confirmed (2026-08-18). Model identities are NOT
-# marked verified: no lab source has been checked for either slug yet, and the
-# taxonomy forbids promoting a slug-derived identity without one.
+# Access values are operator-confirmed: the first three 2026-08-18, the qwen
+# cloud route 2026-08-20.
+#
+# THE CONFIDENCE SPLIT IS NOT ARBITRARY. The three metered slugs are NOT marked
+# verified - no lab source has been checked for them, and the taxonomy forbids
+# promoting a slug-derived identity without one. The two LOCAL slugs ARE
+# verified, because an Ollama tag can be probed on the box for its parent model
+# and manifest; each cites the copilot-* entry that did that probing, since one
+# tag driven by two harnesses is one identity, not two.
 #
 # ONE CELL HERE IS A DEFAULT, NOT A FACT: an unattributed legacy row has no
 # model, so it resolves through the ENGINE block and inherits that engine's
@@ -189,6 +198,64 @@ lab = "Z.ai (Zhipu AI)"
 confidence = "unverified"   # the lab is this registry's own verified identity for GLM 5.2, but that BytePlus's `glm-5.2` IS that model has not been confirmed at source
 source = "~/.cline/data/settings/models.json: openai-compatible baseUrl https://ark.ap-southeast.bytepluses.com/api/coding/v3, defaultModelId glm-5.2"
 last_verified = 2026-08-18
+
+[engines.cline-qwen-cloud]
+# THE FOURTH CLINE ROUTE, and the first that is neither a Cline-billed budget
+# nor a local GPU: qwen3.7-max on the operator's own Alibaba MaaS token plan,
+# reached through the same Cline CLI with `-P openai-compatible`.
+#
+# IT SHARES THAT PROVIDER FLAG WITH cline-glm AND POINTS SOMEWHERE ELSE. Each
+# lane seeds its OWN provider store, and cline resolves -P against its provider
+# id rather than the store key, so there is exactly one openai-compatible slot
+# per store and the two endpoints cannot coexist in one file. If that isolation
+# regresses this lane talks to BytePlus and spends the wrong plan while nothing
+# errors - which is exactly why `access` has to name the PLAN and not the flag.
+harness = "Cline CLI"
+access = "Alibaba MaaS token plan"   # operator-confirmed 2026-08-20; a token plan, not a subscription
+default_model_key = "qwen3.7-max"
+
+[engines.cline-qwen-cloud.models."qwen3.7-max"]
+display = "Qwen3.7 Max"
+lab = "Alibaba"
+confidence = "unverified"   # slug-derived; Alibaba's own model page has not been checked, so this is not promoted
+source = "lane session store ~/.cline-oe/cline-qwen-cloud/1/sessions/*/*.json records model='qwen3.7-max' with provider='openai-compatible', read 2026-08-20"
+last_verified = 2026-08-20
+
+[engines.cline-qwen-local]
+# The same Cline runtime pointed at this box's own Ollama (`-P ollama`), so it
+# is metered by nothing and bounded by the GPU rather than a quota.
+#
+# SAME MODEL AS [engines.copilot-qwen] BELOW - one Ollama tag, two harnesses
+# that have driven it - so that entry's provenance covers this one and is cited
+# unchanged rather than re-derived. Only the harness differs, which is the
+# column that exists to say so. Do not fork the identity into a second slug.
+harness = "Cline CLI"
+access = "Local (Ollama, unmetered)"
+default_model_key = "qwen38-agent-iq4:latest"
+
+[engines.cline-qwen-local.models."qwen38-agent-iq4:latest"]
+display = "Qwen3.8 27B (agent IQ4 64k)"
+lab = "Alibaba"
+confidence = "verified"     # same local Ollama tag as copilot-qwen; provenance checked on box, not re-derived here
+source = "ollama /api/tags parent_model=qwen3.8:27b; registry manifest batiai/qwen3.8-27b:iq4 = 15.08 GB, probed 2026-08-19"
+last_verified = 2026-08-19
+
+[engines.cline-muse-local]
+# REGISTERED BEFORE ITS FIRST ROW, deliberately. The lane is configured and
+# currently parked by hand (held to 2026-08-27 while cline-qwen-local proves
+# the num_ctx fix), so its first run would otherwise land as an unregistered
+# slug and need this whole pass again. Same model as [engines.copilot-muse];
+# that entry's source is cited unchanged, for the same reason as above.
+harness = "Cline CLI"
+access = "Local (Ollama, unmetered)"
+default_model_key = "muse-glimmer-agent-64k:latest"
+
+[engines.cline-muse-local.models."muse-glimmer-agent-64k:latest"]
+display = "Muse Glimmer 30B (agent 64k)"
+lab = "Meta"
+confidence = "verified"     # same local Ollama tag as copilot-muse
+source = "https://developer.meta.com/ai/lp/muse-glimmer/ - Meta, 30B params, Apache 2.0, an open model built for always-on local agents; this entry is a local build from the library/muse-glimmer weights blob sha256-71b5c9c9 with the vision projector omitted"
+last_verified = 2026-08-19
 
 [engines.copilot]
 # NO MODELS BLOCK, DELIBERATELY. A free-plan account can only use `auto`, which
