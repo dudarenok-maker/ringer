@@ -5058,6 +5058,7 @@ def inject_lanes_panel_into_ringside_html(html: str) -> str:
       display: flex;
       flex-wrap: wrap;
       align-items: center;
+      justify-content: center;
       gap: 8px;
       padding: 10px clamp(12px, 2vw, 22px);
       border-bottom: 1px solid var(--hairline);
@@ -5131,8 +5132,16 @@ def inject_lanes_panel_into_ringside_html(html: str) -> str:
           case "stuck": return `stuck, running ${numberOrZero(lane.running_minutes)}m`;
           case "paused": {
             const until = typeof lane.paused_until === "string" ? lane.paused_until : "";
-            const match = until.match(/^\d{4}-\d{2}-\d{2}T(\d{2}:\d{2})/);
-            return match ? `paused til ${match[1]}Z` : "paused";
+            const untilMs = Date.parse(until);
+            // Local, not UTC - oe-lane-status.ps1 emits paused_until as a UTC
+            // ISO timestamp, and the chip used to slice its "HH:MM" digits out
+            // verbatim and label them "Z". Correct, but useless at a glance
+            // for a viewer who has to mentally re-add their own UTC offset.
+            if (!Number.isFinite(untilMs)) return "paused";
+            const d = new Date(untilMs);
+            const hh = String(d.getHours()).padStart(2, "0");
+            const mm = String(d.getMinutes()).padStart(2, "0");
+            return `paused til ${hh}:${mm}`;
           }
           case "failing": return `failing ${numberOrZero(lane.ok)}/${numberOrZero(lane.recent)}`;
           case "idle": return "idle";

@@ -704,6 +704,11 @@ class InjectLanesPanelTests(unittest.TestCase):
         self.assertIn("installLanesPanel();\n    tickClock();", html)
         self.assertIn(".lanes-panel {", html)
 
+    def test_the_chip_row_is_centered(self) -> None:
+        html = ringer.inject_lanes_panel_into_ringside_html(self.BASE_HTML)
+        style_block = html[html.index(".lanes-panel {"):html.index(".lane-chip {")]
+        self.assertIn("justify-content: center", style_block)
+
     def test_panel_lands_before_existing_main_content_not_after(self) -> None:
         html = ringer.inject_lanes_panel_into_ringside_html(self.BASE_HTML)
         self.assertLess(html.index('id="lanes-panel"'), html.index('id="other"'))
@@ -848,6 +853,33 @@ class LanesPanelBrowserBehaviorTests(unittest.TestCase):
         out = self.run_js(harness)
         self.assertIn("cline-glm", out["html"])
         self.assertIn("paused", out["html"])
+
+    def test_paused_until_renders_in_the_viewers_local_time_not_utc(self) -> None:
+        # The chip used to slice paused_until's UTC "HH:MM" digits out
+        # verbatim and label them "Z" - correct, but useless at a glance for
+        # a viewer who has to mentally re-add their own UTC offset. Compares
+        # against what THIS test process's own timezone would produce for
+        # the same instant, rather than a hardcoded clock reading, so it
+        # passes regardless of which timezone actually runs it.
+        harness = """
+        const fakePanel = { hidden: true, className: '', innerHTML: '' };
+        fakePanel.classList = { toggle(name, on) { fakePanel.className = on ? name : ''; }, remove() { fakePanel.className = ''; } };
+        global.document = { getElementById: id => (id === 'lanes-panel' ? fakePanel : null) };
+        const nowIso = new Date().toISOString();
+        const untilIso = '2026-08-22T04:11:52Z';
+        const untilDate = new Date(untilIso);
+        const expectedHH = String(untilDate.getHours()).padStart(2, '0');
+        const expectedMM = String(untilDate.getMinutes()).padStart(2, '0');
+        global.fetch = async () => ({ json: async () => ({ generated_utc: nowIso, lanes: [
+          { engine: 'cline-free', state: 'paused', paused_until: untilIso },
+        ] }) });
+        installLanesPanel();
+        await new Promise(r => setTimeout(r, 50));
+        console.log(JSON.stringify({ html: fakePanel.innerHTML, expected: `${expectedHH}:${expectedMM}` }));
+        """
+        out = self.run_js(harness)
+        self.assertIn(f"paused til {out['expected']}", out["html"])
+        self.assertNotIn("04:11Z", out["html"])
 
 
 if __name__ == "__main__":
