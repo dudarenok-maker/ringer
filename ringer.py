@@ -11043,12 +11043,18 @@ def ensure_hud_running(config: AppConfig, *, open_browser: bool) -> None:
         with contextlib.suppress(Exception):
             log_path.parent.mkdir(parents=True, exist_ok=True)
             with log_path.open("ab") as log_file:
+                # windowsHide equivalent: a detached console-subsystem child
+                # (python.exe) otherwise pops a new, briefly-visible console
+                # window on Windows even though it's meant to run silently in
+                # the background.
+                no_window_kwargs = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
                 subprocess.Popen(
                     [sys.executable, str(Path(__file__).resolve()), "hud", "--no-open", "--port", str(port)],
                     stdout=log_file,
                     stderr=log_file,
                     stdin=subprocess.DEVNULL,
                     start_new_session=True,
+                    **no_window_kwargs,
                 )
         for _ in range(20):
             if hud_is_alive(port):
