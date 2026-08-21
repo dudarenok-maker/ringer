@@ -5105,36 +5105,14 @@ def inject_models_tab_into_ringside_html(html: str) -> str:
       border-color: color-mix(in srgb, var(--accent) 48%, var(--hairline));
       color: var(--accent);
     }
-    .model-breakdown td {
-      padding: 0;
+    .model-breakdown-row td {
       background: color-mix(in srgb, var(--surface) 72%, transparent);
-    }
-    .breakdown-grid {
-      display: grid;
-      grid-template-columns: minmax(120px, 1fr) repeat(5, minmax(70px, auto));
-      gap: 0;
-      padding: 8px 10px 10px 46px;
       color: var(--muted);
       font-size: 12px;
+      padding: 7px 10px;
     }
-    .breakdown-grid > div {
-      padding: 5px 8px;
-      border-bottom: 1px solid var(--hairline);
-      min-width: 0;
-    }
-    .breakdown-head {
-      font-size: 10px;
-      font-weight: 700;
-      letter-spacing: .06em;
-      text-transform: uppercase;
-    }
-    @media (max-width: 760px) {
-      .breakdown-grid {
-        grid-template-columns: minmax(110px, 1fr) repeat(2, minmax(64px, auto));
-        padding-left: 10px;
-      }
-      .breakdown-grid .optional { display: none; }
-    }
+    .breakdown-label { padding-left: 34px; }
+    .breakdown-attempts { color: var(--muted); }
 """
     script = r"""
     function installModelsView() {
@@ -5232,28 +5210,27 @@ def inject_models_tab_into_ringside_html(html: str) -> str:
         return groups.filter(group => String(group?.display_bucket_id || "") === bucketId);
       }
 
+      // Real <td>s in the same 16-column table the summary row uses, not an
+      // independently-sized grid guessing at the parent's column widths -
+      // that guess drifted from the rendered table on a wide screen and the
+      // breakdown numbers no longer lined up under Tasks/First try/Pass.
       function breakdown(bucketId) {
         const groups = groupsFor(bucketId);
-        if (!groups.length) return '<div class="empty">No per-task breakdown recorded for this model.</div>';
-        const cells = [
-          '<div class="breakdown-head">Task type</div>',
-          '<div class="breakdown-head">Tasks</div>',
-          '<div class="breakdown-head">First</div>',
-          '<div class="breakdown-head optional">Pass</div>',
-          '<div class="breakdown-head optional">Attempts</div>',
-          '<div class="breakdown-head optional">Last used</div>',
-        ];
-        groups.forEach(group => {
-          cells.push(
-            `<div>${html(group.task_type || "(untyped)")}</div>`,
-            `<div>${numberOrZeroLocal(group.tasks).toLocaleString()}</div>`,
-            `<div>${html(percent(group.first_try_pass_rate))}</div>`,
-            `<div class="optional">${html(percent(group.pass_rate))}</div>`,
-            `<div class="optional">${numberOrZeroLocal(group.attempts).toLocaleString()}</div>`,
-            `<div class="optional">${html(modelDate(group.last_seen))}</div>`,
-          );
-        });
-        return `<div class="breakdown-grid mono">${cells.join("")}</div>`;
+        if (!groups.length) {
+          return '<tr class="model-breakdown-row"><td colspan="16"><div class="empty">No per-task breakdown recorded for this model.</div></td></tr>';
+        }
+        return groups.map(group => [
+          '<tr class="model-breakdown-row mono">',
+          `<td colspan="5" class="breakdown-label">${html(group.task_type || "(untyped)")}</td>`,
+          `<td class="numeric">${numberOrZeroLocal(group.tasks).toLocaleString()}</td>`,
+          `<td class="numeric">${html(percent(group.first_try_pass_rate))}</td>`,
+          `<td class="numeric">${html(percent(group.pass_rate))}</td>`,
+          '<td colspan="5"></td>',
+          '<td></td>',
+          `<td>${html(modelDate(group.last_seen))}</td>`,
+          `<td class="breakdown-attempts">${numberOrZeroLocal(group.attempts).toLocaleString()} attempts</td>`,
+          '</tr>',
+        ].join("")).join("");
       }
 
       function renderModels() {
@@ -5296,7 +5273,7 @@ def inject_models_tab_into_ringside_html(html: str) -> str:
             `<td class="model-notes" title="${html(notes)}">${html(row.latest_note || "")}</td>`,
             '</tr>',
           );
-          if (expanded) body.push(`<tr class="model-breakdown"><td colspan="16">${breakdown(bucketId)}</td></tr>`);
+          if (expanded) body.push(breakdown(bucketId));
         });
         wrap.innerHTML = [
           '<table class="models-table">',
