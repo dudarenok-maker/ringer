@@ -870,16 +870,44 @@ class LanesPanelBrowserBehaviorTests(unittest.TestCase):
         const untilDate = new Date(untilIso);
         const expectedHH = String(untilDate.getHours()).padStart(2, '0');
         const expectedMM = String(untilDate.getMinutes()).padStart(2, '0');
+        // Independent oracle for the date half - Intl's own formatter, not a
+        // copy of the chip's own MONTHS array, so this can't pass by
+        // agreeing with itself.
+        const expectedDate = untilDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
         global.fetch = async () => ({ json: async () => ({ generated_utc: nowIso, lanes: [
           { engine: 'cline-free', state: 'paused', paused_until: untilIso },
         ] }) });
         installLanesPanel();
         await new Promise(r => setTimeout(r, 50));
-        console.log(JSON.stringify({ html: fakePanel.innerHTML, expected: `${expectedHH}:${expectedMM}` }));
+        console.log(JSON.stringify({ html: fakePanel.innerHTML, expectedTime: `${expectedHH}:${expectedMM}`, expectedDate }));
         """
         out = self.run_js(harness)
-        self.assertIn(f"paused til {out['expected']}", out["html"])
+        self.assertIn(f"paused til {out['expectedDate']}, {out['expectedTime']}", out["html"])
         self.assertNotIn("04:11Z", out["html"])
+
+    def test_paused_until_a_month_boundary_does_not_show_the_wrong_month(self) -> None:
+        # Regression pin for a plausible off-by-one: getMonth() is 0-indexed,
+        # so an unguarded array index (or a hand-rolled +1 done wrong) would
+        # silently show the WRONG month rather than throwing - the kind of
+        # bug that only shows up once a quarter and reads as plausible every
+        # time it's wrong.
+        harness = """
+        const fakePanel = { hidden: true, className: '', innerHTML: '' };
+        fakePanel.classList = { toggle(name, on) { fakePanel.className = on ? name : ''; }, remove() { fakePanel.className = ''; } };
+        global.document = { getElementById: id => (id === 'lanes-panel' ? fakePanel : null) };
+        const nowIso = new Date().toISOString();
+        const untilIso = '2026-01-01T00:00:00Z';
+        const untilDate = new Date(untilIso);
+        const expectedDate = untilDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        global.fetch = async () => ({ json: async () => ({ generated_utc: nowIso, lanes: [
+          { engine: 'cline-free', state: 'paused', paused_until: untilIso },
+        ] }) });
+        installLanesPanel();
+        await new Promise(r => setTimeout(r, 50));
+        console.log(JSON.stringify({ html: fakePanel.innerHTML, expectedDate }));
+        """
+        out = self.run_js(harness)
+        self.assertIn(f"paused til {out['expectedDate']}", out["html"])
 
 
 if __name__ == "__main__":
