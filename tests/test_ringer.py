@@ -4,12 +4,15 @@ import asyncio
 import importlib.util
 import json
 import os
+import re
+import shutil
 import signal
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 
@@ -630,6 +633,43 @@ class OpenEngineLaneStatusTests(unittest.TestCase):
         payload = ringer.read_open_engine_lane_status()
         self.assertEqual(payload["lanes"], [])
 
+    def test_utf8_bom_does_not_read_as_a_missing_file(self) -> None:
+        # PowerShell 5.1's `Set-Content -Encoding UTF8` (oe-lane-status.ps1's
+        # own writer) emits a UTF-8 BOM. Reading it as plain "utf-8" makes
+        # json.loads fail on the leading BOM byte, which reads identically to
+        # "the file does not exist yet" - indistinguishable from open-engine
+        # never having run at all. Write the BOM by hand (the codec name is
+        # what's under test, not the OS's own Set-Content).
+        snapshot = {"generated_utc": "2026-08-21T12:00:00Z", "lanes": [{"engine": "cline", "state": "running"}]}
+        ringer.OPEN_ENGINE_LANE_STATUS_PATH.write_bytes(b"\xef\xbb\xbf" + json.dumps(snapshot).encode("utf-8"))
+        self.assertEqual(ringer.read_open_engine_lane_status(), snapshot)
+
+
+class OpenEngineLaneStatusPathConfigTests(unittest.TestCase):
+    """The path used to be hardcoded to Path.home()/".open-engine" unconditionally
+    for every Ringer install - RINGER_OPEN_ENGINE_LANE_STATUS makes it opt-in
+    per checkout instead, per the project owner's explicit call on the PR
+    review's routed judgment call (default path assumption is fine for THIS
+    fork; it must not be forced on every Ringer user)."""
+
+    def test_env_var_overrides_the_default_path(self) -> None:
+        # OPEN_ENGINE_LANE_STATUS_PATH is computed at import time from the env
+        # var, so this re-executes that one line rather than re-importing the
+        # whole module (which would re-run the module's top-level side effects
+        # a second time under the same sys.modules entry).
+        original = ringer.OPEN_ENGINE_LANE_STATUS_PATH
+        try:
+            with tempfile.TemporaryDirectory(prefix="ringer-lane-path-") as tmp:
+                custom = str(Path(tmp) / "custom-lane-status.json")
+                with unittest.mock.patch.dict(os.environ, {"RINGER_OPEN_ENGINE_LANE_STATUS": custom}):
+                    ringer.OPEN_ENGINE_LANE_STATUS_PATH = Path(
+                        os.environ.get("RINGER_OPEN_ENGINE_LANE_STATUS")
+                        or (Path.home() / ".open-engine" / "lane-status.json")
+                    )
+                    self.assertEqual(str(ringer.OPEN_ENGINE_LANE_STATUS_PATH), custom)
+        finally:
+            ringer.OPEN_ENGINE_LANE_STATUS_PATH = original
+
 
 class InjectLanesPanelTests(unittest.TestCase):
     BASE_HTML = (
@@ -637,6 +677,26 @@ class InjectLanesPanelTests(unittest.TestCase):
         "  <body>\n    <main>\n      <section id=\"other\"></section>\n    </main>\n"
         "    <script>\n    tickClock();\n    </script>\n  </body>\n</html>\n"
     )
+
+    def test_a_missing_style_anchor_is_a_full_no_op_not_a_partial_injection(self) -> None:
+        # Checking only the <main> anchor and then firing three independent
+        # .replace() calls let a renamed CSS selector ship an unstyled panel
+        # with the guard reporting nothing wrong - reproduced against the
+        # real ringside.html by mutating "main {" alone. All three anchors
+        # must be present or none of the three edits happen.
+        broken = self.BASE_HTML.replace("    main {\n", "    main{\n")
+        html = ringer.inject_lanes_panel_into_ringside_html(broken)
+        self.assertEqual(html, broken)
+        self.assertNotIn('id="lanes-panel"', html)
+
+    def test_a_missing_script_anchor_is_a_full_no_op_not_a_partial_injection(self) -> None:
+        # The matching failure mode: a renamed bootstrap call ships a
+        # section+CSS with no installLanesPanel() call anywhere, so the
+        # empty <section> stays hidden by .lanes-panel:empty forever.
+        broken = self.BASE_HTML.replace("    tickClock();\n", "    startClock();\n")
+        html = ringer.inject_lanes_panel_into_ringside_html(broken)
+        self.assertEqual(html, broken)
+        self.assertNotIn('id="lanes-panel"', html)
 
     def test_injects_panel_script_and_style_once(self) -> None:
         html = ringer.inject_lanes_panel_into_ringside_html(self.BASE_HTML)
@@ -656,6 +716,138 @@ class InjectLanesPanelTests(unittest.TestCase):
     def test_missing_main_anchor_is_a_no_op_not_a_crash(self) -> None:
         html = "<html><body>no main tag here</body></html>"
         self.assertEqual(ringer.inject_lanes_panel_into_ringside_html(html), html)
+
+    def test_injects_cleanly_into_the_real_ringside_html(self) -> None:
+        # Every test above runs against a 4-line synthetic fixture. The three
+        # anchors this injector depends on are real strings in a real,
+        # independently-maintained file (dashboard/ringside.html) that other
+        # work can rename without ever touching this file - this is the one
+        # test that would actually catch that.
+        real_html = ringer.RINGSIDE_HTML_PATH.read_text(encoding="utf-8")
+        injected = ringer.inject_lanes_panel_into_ringside_html(real_html)
+        self.assertIn('id="lanes-panel"', injected)
+        self.assertIn("installLanesPanel();", injected)
+        self.assertIn(".lanes-panel {", injected)
+        self.assertNotEqual(injected, real_html)
+
+
+class LanesPanelBrowserBehaviorTests(unittest.TestCase):
+    """Exercises the INJECTED JAVASCRIPT itself under Node, with document/
+    fetch stubbed - the two blocking findings here (stale data rendering as
+    live; one malformed row freezing every other lane's chip forever) are
+    both behaviour of that script, not of the Python string-injection around
+    it, so a Python-only test suite could not have caught either one."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        node = shutil.which("node")
+        if node is None:
+            raise unittest.SkipTest("node not on PATH")
+        cls.node = node
+        real_html = ringer.RINGSIDE_HTML_PATH.read_text(encoding="utf-8")
+        injected = ringer.inject_lanes_panel_into_ringside_html(real_html)
+        match = re.search(
+            r"(function installLanesPanel\(\) \{.*?\n    \})\n\n    installLanesPanel\(\);",
+            injected,
+            re.S,
+        )
+        assert match is not None, "could not extract installLanesPanel() from the injected html"
+        cls.js_function = match.group(1)
+
+    def run_js(self, harness: str) -> dict[str, object]:
+        # installLanesPanel() calls setInterval(), which keeps Node's event
+        # loop alive indefinitely - process.exit(0) is what lets this process
+        # ever return, rather than hanging until the subprocess timeout kills
+        # it every single run.
+        script = f"""
+        {self.js_function}
+        {harness}
+        process.exit(0);
+        """
+        result = subprocess.run(
+            [self.node, "--input-type=module", "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        self.assertEqual(result.returncode, 0, f"stdout={result.stdout!r} stderr={result.stderr!r}")
+        return json.loads(result.stdout.strip().splitlines()[-1])
+
+    def test_stale_snapshot_is_flagged_not_rendered_as_live(self) -> None:
+        # B1: oe-lane-status.ps1 writes generated_utc for exactly this reason
+        # ("Ringside will show stale data ... its own timestamp check") but
+        # the first version of this script never read the field at all, so a
+        # dead oe-tick.ps1 rendered chips indistinguishable from a live one.
+        harness = """
+        const fakePanel = { hidden: true, className: '', innerHTML: '' };
+        fakePanel.classList = { toggle(name, on) { fakePanel.className = on ? name : ''; }, remove() { fakePanel.className = ''; } };
+        global.document = { getElementById: id => (id === 'lanes-panel' ? fakePanel : null) };
+        const oldIso = new Date(Date.now() - 20 * 60 * 1000).toISOString();
+        global.fetch = async () => ({ json: async () => ({ generated_utc: oldIso, lanes: [{ engine: 'cline', state: 'running', running_minutes: 12 }] }) });
+        installLanesPanel();
+        await new Promise(r => setTimeout(r, 50));
+        console.log(JSON.stringify({ staleClass: fakePanel.className, html: fakePanel.innerHTML }));
+        """
+        out = self.run_js(harness)
+        self.assertEqual(out["staleClass"], "lanes-stale")
+        self.assertIn("stale", out["html"])
+
+    def test_fresh_snapshot_is_not_flagged_stale(self) -> None:
+        harness = """
+        const fakePanel = { hidden: true, className: '', innerHTML: '' };
+        fakePanel.classList = { toggle(name, on) { fakePanel.className = on ? name : ''; }, remove() { fakePanel.className = ''; } };
+        global.document = { getElementById: id => (id === 'lanes-panel' ? fakePanel : null) };
+        const freshIso = new Date().toISOString();
+        global.fetch = async () => ({ json: async () => ({ generated_utc: freshIso, lanes: [{ engine: 'cline', state: 'running', running_minutes: 12 }] }) });
+        installLanesPanel();
+        await new Promise(r => setTimeout(r, 50));
+        console.log(JSON.stringify({ staleClass: fakePanel.className, html: fakePanel.innerHTML }));
+        """
+        out = self.run_js(harness)
+        self.assertEqual(out["staleClass"], "")
+        self.assertNotIn("stale", out["html"])
+
+    def test_one_malformed_row_does_not_freeze_the_others(self) -> None:
+        # B2: an unguarded lanes.map() over one bad row threw before
+        # innerHTML was ever assigned, so a single null/malformed entry froze
+        # EVERY lane's chip on its previous value, silently, forever (the
+        # 15s interval kept re-fetching the same bad payload).
+        harness = """
+        const fakePanel = { hidden: true, className: '', innerHTML: '' };
+        fakePanel.classList = { toggle(name, on) { fakePanel.className = on ? name : ''; }, remove() { fakePanel.className = ''; } };
+        global.document = { getElementById: id => (id === 'lanes-panel' ? fakePanel : null) };
+        const nowIso = new Date().toISOString();
+        global.fetch = async () => ({ json: async () => ({ generated_utc: nowIso, lanes: [
+          { engine: 'claude', state: 'idle' }, null,
+        ] }) });
+        installLanesPanel();
+        await new Promise(r => setTimeout(r, 50));
+        console.log(JSON.stringify({ hidden: fakePanel.hidden, html: fakePanel.innerHTML }));
+        """
+        out = self.run_js(harness)
+        self.assertFalse(out["hidden"])
+        self.assertIn("claude", out["html"])
+        self.assertIn("state-unknown", out["html"])
+
+    def test_a_wrong_typed_paused_until_degrades_instead_of_throwing(self) -> None:
+        # M3-adjacent: paused_until.slice() on a non-string used to be
+        # unguarded; still a "chip crashes, others freeze" shape under B2's
+        # fix if left unguarded, so it is pinned here too.
+        harness = """
+        const fakePanel = { hidden: true, className: '', innerHTML: '' };
+        fakePanel.classList = { toggle(name, on) { fakePanel.className = on ? name : ''; }, remove() { fakePanel.className = ''; } };
+        global.document = { getElementById: id => (id === 'lanes-panel' ? fakePanel : null) };
+        const nowIso = new Date().toISOString();
+        global.fetch = async () => ({ json: async () => ({ generated_utc: nowIso, lanes: [
+          { engine: 'cline-glm', state: 'paused', paused_until: 12345 },
+        ] }) });
+        installLanesPanel();
+        await new Promise(r => setTimeout(r, 50));
+        console.log(JSON.stringify({ html: fakePanel.innerHTML }));
+        """
+        out = self.run_js(harness)
+        self.assertIn("cline-glm", out["html"])
+        self.assertIn("paused", out["html"])
 
 
 if __name__ == "__main__":
