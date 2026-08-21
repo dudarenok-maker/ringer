@@ -5171,7 +5171,15 @@ def inject_models_tab_into_ringside_html(html: str) -> str:
         return numberOrZeroLocal(r);
       }
 
-      function percent(value) {
+      // Blank when nothing was SCORED, not 0% - the Python CLI table (see
+      // print_model_log_table) already makes this call for the same reason:
+      // a lane with zero scored tasks (e.g. one whose entire history is
+      // excluded tick noise) rendering "0%" reads as "tried and failed
+      // everything", not as "never actually produced a scored result". The
+      // HTML dashboard never got the same guard, so a model row could show
+      // real token spend next to a false "0%" First try/Pass.
+      function percent(value, tasks) {
+        if (!numberOrZeroLocal(tasks)) return "";
         const number = Number(value);
         return Number.isFinite(number) ? `${Math.round(number * 100)}%` : "0%";
       }
@@ -5223,8 +5231,8 @@ def inject_models_tab_into_ringside_html(html: str) -> str:
           '<tr class="model-breakdown-row mono">',
           `<td colspan="5" class="breakdown-label">${html(group.task_type || "(untyped)")}</td>`,
           `<td class="numeric">${numberOrZeroLocal(group.tasks).toLocaleString()}</td>`,
-          `<td class="numeric">${html(percent(group.first_try_pass_rate))}</td>`,
-          `<td class="numeric">${html(percent(group.pass_rate))}</td>`,
+          `<td class="numeric">${html(percent(group.first_try_pass_rate, group.tasks))}</td>`,
+          `<td class="numeric">${html(percent(group.pass_rate, group.tasks))}</td>`,
           '<td colspan="5"></td>',
           '<td></td>',
           `<td>${html(modelDate(group.last_seen))}</td>`,
@@ -5261,8 +5269,8 @@ def inject_models_tab_into_ringside_html(html: str) -> str:
             `<td>${html(row.access || "unknown")}</td>`,
             `<td><span class="tier-badge ${html(tierClass)}">${html(tier)}</span></td>`,
             `<td class="numeric">${numberOrZeroLocal(row.tasks).toLocaleString()}</td>`,
-            `<td class="numeric">${html(percent(row.first_try_pass_rate))}</td>`,
-            `<td class="numeric">${html(percent(row.pass_rate))}</td>`,
+            `<td class="numeric">${html(percent(row.first_try_pass_rate, row.tasks))}</td>`,
+            `<td class="numeric">${html(percent(row.pass_rate, row.tasks))}</td>`,
             `<td class="numeric">${row.median_tokens === null || row.median_tokens === undefined ? "" : numberOrZeroLocal(row.median_tokens).toLocaleString()}</td>`,
             `<td class="numeric">${row.total_tokens === null || row.total_tokens === undefined ? "" : numberOrZeroLocal(row.total_tokens).toLocaleString()}</td>`,
             `<td class="numeric">${tokenCell(freshInputTokens(row))}</td>`,
