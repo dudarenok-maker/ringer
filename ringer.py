@@ -94,6 +94,12 @@ CSP_META_TAG = (
 )
 DASHBOARD_HTML_PATH = Path(__file__).resolve().parent / "dashboard" / "dashboard.html"
 RINGSIDE_HTML_PATH = Path(__file__).resolve().parent / "dashboard" / "ringside.html"
+# Open Engine's own snapshot (bin/oe-lane-status.ps1, run at the end of every
+# tick), not anything Ringer itself writes - this is a read-only cross-project
+# coupling, same spirit as the "Open Engine lane models" handling elsewhere in
+# this file. Fixed path, not derived from --state-dir: lane health is a
+# machine-wide fact, not a per-run one, and oe-tick.ps1 always writes here.
+OPEN_ENGINE_LANE_STATUS_PATH = Path.home() / ".open-engine" / "lane-status.json"
 MINIMAL_DASHBOARD_HTML = """<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><title>ringer dashboard</title></head>
@@ -5019,6 +5025,115 @@ def artifact_content_type(path: Path) -> str:
     return "application/octet-stream"
 
 
+def inject_lanes_panel_into_ringside_html(html: str) -> str:
+    # Idempotent, same guard shape as the models injector below: safe to call
+    # on html that already carries the panel (e.g. a second injector run), and
+    # a no-op on an unexpected ringside.html shape rather than a crash.
+    if 'id="lanes-panel"' in html or "    <main>\n" not in html:
+        return html
+    panel = """      <section id="lanes-panel" class="lanes-panel mono" aria-label="Open Engine lanes" hidden></section>
+"""
+    style = """
+    .lanes-panel {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 10px clamp(12px, 2vw, 22px);
+      border-bottom: 1px solid var(--hairline);
+    }
+    .lanes-panel:empty { display: none; }
+    .lane-chip {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 6px;
+      padding: 4px 9px;
+      border: 1px solid var(--hairline);
+      border-radius: 999px;
+      font-size: 12px;
+    }
+    .lane-chip .lane-engine { font-weight: 700; color: var(--ink); }
+    .lane-chip .lane-detail { color: var(--muted); }
+    .lane-chip.state-running { border-color: color-mix(in srgb, var(--pass) 48%, var(--hairline)); }
+    .lane-chip.state-running .lane-detail { color: var(--pass); }
+    .lane-chip.state-paused { border-color: color-mix(in srgb, var(--accent) 48%, var(--hairline)); }
+    .lane-chip.state-paused .lane-detail { color: var(--accent); }
+    .lane-chip.state-failing,
+    .lane-chip.state-stuck { border-color: color-mix(in srgb, var(--fail) 48%, var(--hairline)); }
+    .lane-chip.state-failing .lane-detail,
+    .lane-chip.state-stuck .lane-detail { color: var(--fail); }
+"""
+    script = r"""
+    function installLanesPanel() {
+      const LANES_REFRESH_MS = 15000;
+      const panel = document.getElementById("lanes-panel");
+      if (!panel) return;
+
+      function html(value) {
+        return String(value ?? "")
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#39;");
+      }
+
+      // A short label per state, plus a longer one for the tooltip - the chip
+      // itself must stay scannable at a glance, the "why" is a hover away.
+      function laneDetail(lane) {
+        switch (lane.state) {
+          case "running": return `running ${Number(lane.running_minutes) || 0}m`;
+          case "stuck": return `stuck, running ${Number(lane.running_minutes) || 0}m`;
+          case "paused": return lane.paused_until ? `paused til ${lane.paused_until.slice(11, 16)}Z` : "paused";
+          case "failing": return `failing ${Number(lane.ok) || 0}/${Number(lane.recent) || 0}`;
+          default: return "idle";
+        }
+      }
+
+      function laneTitle(lane) {
+        const parts = [`state: ${lane.state}`];
+        if (lane.recent) parts.push(`${lane.ok}/${lane.recent} produced a result over ${lane.span_hours}h`);
+        if (lane.credit_dead) parts.push(`${lane.credit_dead} credit-dead launch(es) excluded`);
+        if (lane.paused_until) parts.push(`parked until ${lane.paused_until}`);
+        return parts.join(" - ");
+      }
+
+      function render(payload) {
+        const lanes = Array.isArray(payload?.lanes) ? payload.lanes : [];
+        if (!lanes.length) {
+          panel.hidden = true;
+          panel.innerHTML = "";
+          return;
+        }
+        panel.hidden = false;
+        panel.innerHTML = lanes.map(lane => `
+          <span class="lane-chip state-${html(lane.state || "idle")}" title="${html(laneTitle(lane))}">
+            <span class="lane-engine">${html(lane.engine)}</span>
+            <span class="lane-detail">${html(laneDetail(lane))}</span>
+          </span>
+        `).join("");
+      }
+
+      async function fetchLanes() {
+        try {
+          const response = await fetch(`/api/lanes?t=${Date.now()}`, {cache: "no-store"});
+          render(await response.json());
+        } catch (error) {
+          // Best-effort, same as the rest of this panel: a fetch failure just
+          // leaves the last-known chips on screen rather than clearing them.
+        }
+      }
+
+      fetchLanes();
+      setInterval(fetchLanes, LANES_REFRESH_MS);
+    }
+
+"""
+    html = html.replace("    main {\n", style + "    main {\n", 1)
+    html = html.replace("    <main>\n", "    <main>\n" + panel, 1)
+    html = html.replace("    tickClock();\n", script + "    installLanesPanel();\n    tickClock();\n", 1)
+    return html
+
+
 def inject_models_tab_into_ringside_html(html: str) -> str:
     if 'id="models-panel"' in html or 'id="artifacts-panel"' not in html:
         return html
@@ -5358,7 +5473,10 @@ def inject_models_tab_into_ringside_html(html: str) -> str:
 
 def read_ringside_html() -> str:
     try:
-        return inject_models_tab_into_ringside_html(RINGSIDE_HTML_PATH.read_text(encoding="utf-8"))
+        html = RINGSIDE_HTML_PATH.read_text(encoding="utf-8")
+        html = inject_models_tab_into_ringside_html(html)
+        html = inject_lanes_panel_into_ringside_html(html)
+        return html
     except OSError:
         return """<!doctype html>
 <html lang="en">
@@ -5402,6 +5520,13 @@ def read_json_object(path: Path, default: dict[str, Any]) -> dict[str, Any]:
     except (FileNotFoundError, OSError, json.JSONDecodeError, UnicodeDecodeError):
         return default
     return data if isinstance(data, dict) else default
+
+
+def read_open_engine_lane_status() -> dict[str, Any]:
+    # Absence is normal, not an error: a box that has never run Open Engine's
+    # tick, or one whose oe-lane-status.ps1 write failed, has no file here -
+    # the panel renders an empty state rather than a fetch error either way.
+    return read_json_object(OPEN_ENGINE_LANE_STATUS_PATH, {"generated_utc": None, "lanes": []})
 
 
 def scan_hud_run_states(state_dir: Path, *, limit: int = 12) -> list[dict[str, Any]]:
@@ -5566,6 +5691,9 @@ class PersistentHudServer:
                             "update": server_ref.update_status,
                         },
                     )
+                    return
+                if path == "/api/lanes":
+                    send_json_response(self, read_open_engine_lane_status())
                     return
                 if path == "/api/models":
                     try:

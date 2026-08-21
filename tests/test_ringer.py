@@ -596,5 +596,67 @@ class RingerCliTests(unittest.TestCase):
         self.assertEqual(ringer.parse_token_count("tokens used\n5,678", r"tokens\s+used\s*:?\s*([0-9][0-9,]*)"), 5678)
 
 
+class OpenEngineLaneStatusTests(unittest.TestCase):
+    """Covers the Ringside panel that surfaces oe-lane-status.ps1's snapshot -
+    added because a crashed Open Engine lane leaves no trace on GitHub (it
+    dies before the board or the issue is ever touched), so this file was the
+    only place left that could show it without the operator running
+    oe-doctor.ps1 by hand."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory(prefix="ringer-lane-status-")
+        self.original_path = ringer.OPEN_ENGINE_LANE_STATUS_PATH
+        ringer.OPEN_ENGINE_LANE_STATUS_PATH = Path(self.tmp.name) / "lane-status.json"
+
+    def tearDown(self) -> None:
+        ringer.OPEN_ENGINE_LANE_STATUS_PATH = self.original_path
+        self.tmp.cleanup()
+
+    def test_missing_file_reads_as_an_empty_lane_list_not_an_error(self) -> None:
+        payload = ringer.read_open_engine_lane_status()
+        self.assertEqual(payload["lanes"], [])
+        self.assertIsNone(payload["generated_utc"])
+
+    def test_reads_a_written_snapshot_verbatim(self) -> None:
+        snapshot = {
+            "generated_utc": "2026-08-21T12:00:00Z",
+            "lanes": [{"engine": "cline", "state": "running", "running_minutes": 12}],
+        }
+        ringer.OPEN_ENGINE_LANE_STATUS_PATH.write_text(json.dumps(snapshot), encoding="utf-8")
+        self.assertEqual(ringer.read_open_engine_lane_status(), snapshot)
+
+    def test_malformed_json_reads_as_empty_rather_than_crashing_the_hud(self) -> None:
+        ringer.OPEN_ENGINE_LANE_STATUS_PATH.write_text("{not valid json", encoding="utf-8")
+        payload = ringer.read_open_engine_lane_status()
+        self.assertEqual(payload["lanes"], [])
+
+
+class InjectLanesPanelTests(unittest.TestCase):
+    BASE_HTML = (
+        "<html>\n  <head><style>\n    main {\n    }\n    </style></head>\n"
+        "  <body>\n    <main>\n      <section id=\"other\"></section>\n    </main>\n"
+        "    <script>\n    tickClock();\n    </script>\n  </body>\n</html>\n"
+    )
+
+    def test_injects_panel_script_and_style_once(self) -> None:
+        html = ringer.inject_lanes_panel_into_ringside_html(self.BASE_HTML)
+        self.assertIn('id="lanes-panel"', html)
+        self.assertIn("installLanesPanel();\n    tickClock();", html)
+        self.assertIn(".lanes-panel {", html)
+
+    def test_panel_lands_before_existing_main_content_not_after(self) -> None:
+        html = ringer.inject_lanes_panel_into_ringside_html(self.BASE_HTML)
+        self.assertLess(html.index('id="lanes-panel"'), html.index('id="other"'))
+
+    def test_is_idempotent_on_html_that_already_carries_the_panel(self) -> None:
+        once = ringer.inject_lanes_panel_into_ringside_html(self.BASE_HTML)
+        twice = ringer.inject_lanes_panel_into_ringside_html(once)
+        self.assertEqual(once, twice)
+
+    def test_missing_main_anchor_is_a_no_op_not_a_crash(self) -> None:
+        html = "<html><body>no main tag here</body></html>"
+        self.assertEqual(ringer.inject_lanes_panel_into_ringside_html(html), html)
+
+
 if __name__ == "__main__":
     unittest.main()
