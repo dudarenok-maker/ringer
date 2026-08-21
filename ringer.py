@@ -94,6 +94,18 @@ CSP_META_TAG = (
 )
 DASHBOARD_HTML_PATH = Path(__file__).resolve().parent / "dashboard" / "dashboard.html"
 RINGSIDE_HTML_PATH = Path(__file__).resolve().parent / "dashboard" / "ringside.html"
+# Open Engine's own snapshot (bin/oe-lane-status.ps1, run at the end of every
+# tick), not anything Ringer itself writes - this is a read-only cross-project
+# coupling, same spirit as the "Open Engine lane models" handling elsewhere in
+# this file. NOT derived from --state-dir: lane health is a machine-wide fact,
+# not a per-run one. The default assumes oe-tick.ps1's own default layout,
+# which most Ringer checkouts have no reason to have - RINGER_OPEN_ENGINE_LANE_STATUS
+# overrides it (unset it, or point it at a nonexistent path, to opt fully out;
+# the panel already renders empty/hidden when the file is missing).
+OPEN_ENGINE_LANE_STATUS_PATH = Path(
+    os.environ.get(f"{ENV_VAR_PREFIX}_OPEN_ENGINE_LANE_STATUS")
+    or (Path.home() / ".open-engine" / "lane-status.json")
+)
 MINIMAL_DASHBOARD_HTML = """<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><title>ringer dashboard</title></head>
@@ -5019,6 +5031,196 @@ def artifact_content_type(path: Path) -> str:
     return "application/octet-stream"
 
 
+def inject_lanes_panel_into_ringside_html(html: str) -> str:
+    # Idempotent, same guard shape as the models injector below: safe to call
+    # on html that already carries the panel (e.g. a second injector run).
+    # ALL THREE anchors are checked before touching anything - checking only
+    # one and then blindly firing three independent .replace() calls let a
+    # renamed CSS selector or bootstrap call silently ship an unstyled or
+    # inert (no installLanesPanel(), so the panel stays empty and
+    # :empty-hidden forever) page with the guard reporting nothing wrong.
+    # This way a broken anchor is a clean, detectable no-op on ALL three
+    # pieces, never a partial injection.
+    main_style_anchor = "    main {\n"
+    main_open_anchor = "    <main>\n"
+    script_anchor = "    tickClock();\n"
+    if (
+        'id="lanes-panel"' in html
+        or main_style_anchor not in html
+        or main_open_anchor not in html
+        or script_anchor not in html
+    ):
+        return html
+    panel = """      <section id="lanes-panel" class="lanes-panel mono" aria-label="Open Engine lanes" hidden></section>
+"""
+    style = """
+    .lanes-panel {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      padding: 10px clamp(12px, 2vw, 22px);
+      border-bottom: 1px solid var(--hairline);
+    }
+    .lanes-panel:empty { display: none; }
+    .lanes-panel.lanes-stale { opacity: 0.55; }
+    .lanes-stale-note { font-size: 11px; color: var(--fail); }
+    .lane-chip {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 6px;
+      padding: 4px 9px;
+      border: 1px solid var(--hairline);
+      border-radius: 999px;
+      font-size: 12px;
+    }
+    .lane-chip .lane-engine { font-weight: 700; color: var(--ink); }
+    .lane-chip .lane-detail { color: var(--muted); }
+    .lane-chip.state-running { border-color: color-mix(in srgb, var(--pass) 48%, var(--hairline)); }
+    .lane-chip.state-running .lane-detail { color: var(--pass); }
+    .lane-chip.state-paused { border-color: color-mix(in srgb, var(--accent) 48%, var(--hairline)); }
+    .lane-chip.state-paused .lane-detail { color: var(--accent); }
+    .lane-chip.state-failing,
+    .lane-chip.state-stuck { border-color: color-mix(in srgb, var(--fail) 48%, var(--hairline)); }
+    .lane-chip.state-failing .lane-detail,
+    .lane-chip.state-stuck .lane-detail { color: var(--fail); }
+    .lane-chip.state-unknown { border-color: var(--hairline); }
+"""
+    script = r"""
+    function installLanesPanel() {
+      const LANES_REFRESH_MS = 15000;
+      // A snapshot older than this reads as stale rather than live - the
+      // producer (oe-lane-status.ps1) refreshes roughly every 5 minutes even
+      // mid-run, so anything past ~3x that means the writer has stopped
+      // (e.g. oe-tick.ps1 died), which is exactly the case this panel exists
+      // to surface and was otherwise showing as confidently, silently wrong.
+      const STALE_AFTER_MS = 15 * 60 * 1000;
+      const KNOWN_STATES = new Set(["running", "stuck", "paused", "failing", "idle"]);
+      const panel = document.getElementById("lanes-panel");
+      if (!panel) return;
+      let lastGoodHtml = "";
+
+      function html(value) {
+        return String(value ?? "")
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#39;");
+      }
+
+      function safeState(lane) {
+        const state = String(lane?.state ?? "");
+        return KNOWN_STATES.has(state) ? state : "unknown";
+      }
+
+      function numberOrZero(value) {
+        const n = Number(value);
+        return Number.isFinite(n) ? n : 0;
+      }
+
+      // A short label per state, plus a longer one for the tooltip - the chip
+      // itself must stay scannable at a glance, the "why" is a hover away.
+      // Every field is defensively coerced: a malformed or partial row must
+      // degrade to a legible "unknown"/blank rather than throwing and taking
+      // the whole render down with it (a single bad row used to freeze every
+      // OTHER lane's chip on its last-known value, forever).
+      function laneDetail(lane) {
+        switch (safeState(lane)) {
+          case "running": return `running ${numberOrZero(lane.running_minutes)}m`;
+          case "stuck": return `stuck, running ${numberOrZero(lane.running_minutes)}m`;
+          case "paused": {
+            const until = typeof lane.paused_until === "string" ? lane.paused_until : "";
+            const match = until.match(/^\d{4}-\d{2}-\d{2}T(\d{2}:\d{2})/);
+            return match ? `paused til ${match[1]}Z` : "paused";
+          }
+          case "failing": return `failing ${numberOrZero(lane.ok)}/${numberOrZero(lane.recent)}`;
+          case "idle": return "idle";
+          default: return "unknown";
+        }
+      }
+
+      function laneTitle(lane) {
+        const parts = [`state: ${html(safeState(lane))}`];
+        if (lane?.recent) parts.push(`${numberOrZero(lane.ok)}/${numberOrZero(lane.recent)} produced a result over ${numberOrZero(lane.span_hours)}h`);
+        if (lane?.credit_dead) parts.push(`${numberOrZero(lane.credit_dead)} credit-dead launch(es) excluded`);
+        if (typeof lane?.paused_until === "string" && lane.paused_until) parts.push(`parked until ${lane.paused_until}`);
+        return parts.join(" - ");
+      }
+
+      // One malformed entry (null, missing fields, wrong types) must degrade
+      // to a single "unknown" chip for that engine, never crash the whole
+      // render - reproduced: an unguarded lanes.map() over one bad row threw
+      // before innerHTML was ever assigned, so every chip froze on its
+      // previous, increasingly stale value with no visible error anywhere.
+      function chipFor(lane) {
+        if (!lane || typeof lane !== "object") {
+          return '<span class="lane-chip state-unknown"><span class="lane-engine">?</span><span class="lane-detail">unknown</span></span>';
+        }
+        const engine = typeof lane.engine === "string" && lane.engine ? lane.engine : "?";
+        try {
+          return `
+            <span class="lane-chip state-${html(safeState(lane))}" title="${html(laneTitle(lane))}">
+              <span class="lane-engine">${html(engine)}</span>
+              <span class="lane-detail">${html(laneDetail(lane))}</span>
+            </span>
+          `;
+        } catch (error) {
+          return `<span class="lane-chip state-unknown"><span class="lane-engine">${html(engine)}</span><span class="lane-detail">unknown</span></span>`;
+        }
+      }
+
+      function staleNote(payload) {
+        const generated = Date.parse(payload?.generated_utc ?? "");
+        if (!Number.isFinite(generated)) return null;
+        const ageMs = Date.now() - generated;
+        if (ageMs < STALE_AFTER_MS) return null;
+        const ageMin = Math.round(ageMs / 60000);
+        return `stale - last updated ${ageMin}m ago`;
+      }
+
+      function render(payload) {
+        const lanes = Array.isArray(payload?.lanes) ? payload.lanes : [];
+        if (!lanes.length) {
+          panel.hidden = true;
+          panel.classList.remove("lanes-stale");
+          panel.innerHTML = "";
+          lastGoodHtml = "";
+          return;
+        }
+        const note = staleNote(payload);
+        panel.classList.toggle("lanes-stale", Boolean(note));
+        const chipsHtml = lanes.map(chipFor).join("");
+        const noteHtml = note ? `<span class="lanes-stale-note">${html(note)}</span>` : "";
+        panel.innerHTML = chipsHtml + noteHtml;
+        panel.hidden = false;
+        lastGoodHtml = panel.innerHTML;
+      }
+
+      async function fetchLanes() {
+        try {
+          const response = await fetch("/api/lanes", {cache: "no-store"});
+          render(await response.json());
+        } catch (error) {
+          // A FETCH failure (network/parse) leaves the last-known chips on
+          // screen, same as before - but render() itself can no longer throw
+          // (chipFor() catches per-row), so this branch is reserved for
+          // fetch()/response.json() failing outright, not a bad payload.
+          void lastGoodHtml;
+        }
+      }
+
+      fetchLanes();
+      setInterval(fetchLanes, LANES_REFRESH_MS);
+    }
+
+"""
+    html = html.replace(main_style_anchor, style + main_style_anchor, 1)
+    html = html.replace(main_open_anchor, main_open_anchor + panel, 1)
+    html = html.replace(script_anchor, script + "    installLanesPanel();\n" + script_anchor, 1)
+    return html
+
+
 def inject_models_tab_into_ringside_html(html: str) -> str:
     if 'id="models-panel"' in html or 'id="artifacts-panel"' not in html:
         return html
@@ -5358,7 +5560,10 @@ def inject_models_tab_into_ringside_html(html: str) -> str:
 
 def read_ringside_html() -> str:
     try:
-        return inject_models_tab_into_ringside_html(RINGSIDE_HTML_PATH.read_text(encoding="utf-8"))
+        html = RINGSIDE_HTML_PATH.read_text(encoding="utf-8")
+        html = inject_models_tab_into_ringside_html(html)
+        html = inject_lanes_panel_into_ringside_html(html)
+        return html
     except OSError:
         return """<!doctype html>
 <html lang="en">
@@ -5398,10 +5603,24 @@ def send_json_response(handler: BaseHTTPRequestHandler, data: dict[str, Any]) ->
 
 def read_json_object(path: Path, default: dict[str, Any]) -> dict[str, Any]:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        # utf-8-sig, not utf-8: PowerShell 5.1's `Set-Content -Encoding UTF8`
+        # (oe-lane-status.ps1's writer) emits a UTF-8 BOM. Read as plain utf-8,
+        # that BOM becomes a leading ﻿ character, json.loads then fails
+        # to parse the object at all, and this falls through to `default` -
+        # indistinguishable from "the file doesn't exist yet". Every OTHER
+        # caller of this function reads Python-written JSON with no BOM, and
+        # utf-8-sig is a no-op there (it only strips a BOM if one is present).
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
     except (FileNotFoundError, OSError, json.JSONDecodeError, UnicodeDecodeError):
         return default
     return data if isinstance(data, dict) else default
+
+
+def read_open_engine_lane_status() -> dict[str, Any]:
+    # Absence is normal, not an error: a box that has never run Open Engine's
+    # tick, or one whose oe-lane-status.ps1 write failed, has no file here -
+    # the panel renders an empty state rather than a fetch error either way.
+    return read_json_object(OPEN_ENGINE_LANE_STATUS_PATH, {"generated_utc": None, "lanes": []})
 
 
 def scan_hud_run_states(state_dir: Path, *, limit: int = 12) -> list[dict[str, Any]]:
@@ -5566,6 +5785,9 @@ class PersistentHudServer:
                             "update": server_ref.update_status,
                         },
                     )
+                    return
+                if path == "/api/lanes":
+                    send_json_response(self, read_open_engine_lane_status())
                     return
                 if path == "/api/models":
                     try:
