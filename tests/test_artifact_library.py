@@ -6,6 +6,8 @@ import json
 import os
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -206,6 +208,81 @@ class ArtifactLibraryTests(unittest.TestCase):
         after_text = path.read_text(encoding="utf-8")
         self.assertEqual(before_text, after_text)
         self.assertEqual(before_data, json.loads(after_text))
+
+    def test_concurrent_lane_updates_do_not_lose_each_other(self) -> None:
+        # Reproduces the reported symptom: a lane that finishes rarely
+        # (Lane B here) had real run/report/version files on disk but no
+        # library.json entry, because a concurrent writer's STALE read
+        # (started before Lane B's write landed) wrote LAST and silently
+        # reverted it. Slow down the FIRST writer's read so the SECOND
+        # writer's update_artifact_library_live call is guaranteed to be
+        # in flight -- queued on the lock, pre-fix racing the read-modify-
+        # write cycle -- while the first is still inside its own critical
+        # section. Both entries must survive regardless of ordering.
+        original_read = ringer.read_artifact_library
+        lane_a_reading = threading.Event()
+
+        def slow_read(state_dir: Path) -> dict[str, object]:
+            result = original_read(state_dir)
+            lane_a_reading.set()
+            time.sleep(0.3)
+            return result
+
+        def write_lane_a() -> None:
+            with mock.patch("ringer.read_artifact_library", side_effect=slow_read):
+                update_artifact_library_live(
+                    self.state_dir,
+                    run_name="Lane A",
+                    run_id="lane-a-run",
+                    identity="agent",
+                    state="live",
+                )
+
+        def write_lane_b() -> None:
+            self.assertTrue(lane_a_reading.wait(timeout=5), "Lane A never started its read")
+            update_artifact_library_live(
+                self.state_dir,
+                run_name="Lane B",
+                run_id="lane-b-run",
+                identity="agent",
+                state="live",
+            )
+
+        thread_a = threading.Thread(target=write_lane_a)
+        thread_b = threading.Thread(target=write_lane_b)
+        thread_a.start()
+        thread_b.start()
+        thread_a.join(timeout=10)
+        thread_b.join(timeout=10)
+        self.assertFalse(thread_a.is_alive())
+        self.assertFalse(thread_b.is_alive())
+
+        library = read_artifact_library(self.state_dir)
+        self.assertEqual({"Lane A", "Lane B"}, set(library["artifacts"]))
+
+    def test_lock_serializes_overlapping_critical_sections(self) -> None:
+        active = 0
+        max_active = 0
+        lock = threading.Lock()
+
+        def hold() -> None:
+            nonlocal active, max_active
+            with ringer.artifact_library_lock(self.state_dir):
+                with lock:
+                    active += 1
+                    max_active = max(max_active, active)
+                time.sleep(0.05)
+                with lock:
+                    active -= 1
+
+        threads = [threading.Thread(target=hold) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+
+        self.assertEqual(1, max_active)
+        self.assertFalse(ringer.artifact_library_lock_path(self.state_dir).exists())
 
     def test_startup_reconcile_marks_stale_live_entry_died(self) -> None:
         update_artifact_library_live(
