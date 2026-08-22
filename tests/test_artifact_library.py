@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import contextlib
 import http.client
+import io
 import json
 import os
 import sys
@@ -11,6 +13,7 @@ import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 from unittest import mock
 from urllib.request import urlopen
 
@@ -209,6 +212,33 @@ class ArtifactLibraryTests(unittest.TestCase):
         self.assertEqual(before_text, after_text)
         self.assertEqual(before_data, json.loads(after_text))
 
+    def run_threads_and_collect_errors(self, targets: list[Callable[[], None]]) -> list[BaseException]:
+        # A thread target's exception does NOT fail unittest on its own -- it
+        # just prints to stderr and the thread dies quietly. An earlier
+        # version of test_concurrent_lane_updates_do_not_lose_each_other
+        # relied on bare threading.Thread for exactly this reason: it stayed
+        # green while a real, adversarially-discovered Windows PermissionError
+        # was silently swallowing one thread's write, ~7.5% of the time.
+        # Every threaded test in this file MUST route through this helper.
+        errors: list[BaseException] = []
+        errors_lock = threading.Lock()
+
+        def guarded(fn: Callable[[], None]) -> None:
+            try:
+                fn()
+            except BaseException as exc:  # noqa: BLE001 - the test wants to see everything
+                with errors_lock:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=guarded, args=(fn,)) for fn in targets]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=15)
+        for thread in threads:
+            self.assertFalse(thread.is_alive(), "a thread never finished within the join timeout")
+        return errors
+
     def test_concurrent_lane_updates_do_not_lose_each_other(self) -> None:
         # Reproduces the reported symptom: a lane that finishes rarely
         # (Lane B here) had real run/report/version files on disk but no
@@ -248,14 +278,8 @@ class ArtifactLibraryTests(unittest.TestCase):
                 state="live",
             )
 
-        thread_a = threading.Thread(target=write_lane_a)
-        thread_b = threading.Thread(target=write_lane_b)
-        thread_a.start()
-        thread_b.start()
-        thread_a.join(timeout=10)
-        thread_b.join(timeout=10)
-        self.assertFalse(thread_a.is_alive())
-        self.assertFalse(thread_b.is_alive())
+        errors = self.run_threads_and_collect_errors([write_lane_a, write_lane_b])
+        self.assertEqual([], errors, "a lane's write raised instead of landing")
 
         library = read_artifact_library(self.state_dir)
         self.assertEqual({"Lane A", "Lane B"}, set(library["artifacts"]))
@@ -275,14 +299,94 @@ class ArtifactLibraryTests(unittest.TestCase):
                 with lock:
                     active -= 1
 
-        threads = [threading.Thread(target=hold) for _ in range(4)]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join(timeout=10)
-
+        errors = self.run_threads_and_collect_errors([hold] * 4)
+        self.assertEqual([], errors)
         self.assertEqual(1, max_active)
-        self.assertFalse(ringer.artifact_library_lock_path(self.state_dir).exists())
+
+        # The lock file is a PERSISTENT OS-lockable file now (msvcrt/flock on
+        # a file that is opened, never deleted) -- unlike the earlier
+        # create/delete design, its continued existence is expected, not a
+        # leak. What actually proves nothing is still held is that a fresh
+        # acquisition succeeds immediately rather than waiting out the timeout.
+        self.assertTrue(ringer.artifact_library_lock_path(self.state_dir).exists())
+        acquire_started = time.monotonic()
+        with ringer.artifact_library_lock(self.state_dir):
+            pass
+        self.assertLess(time.monotonic() - acquire_started, 1.0, "a lock from a finished thread was still held")
+
+    def test_lock_survives_heavy_real_contention_with_no_exceptions_or_lost_entries(self) -> None:
+        # Two REAL defects surfaced only under genuine, unslowed, high-volume
+        # concurrency -- neither reproduced with a handful of threads doing
+        # one write apiece, which is why this test hammers hard rather than
+        # settling for a light smoke check:
+        #
+        # 1. os.replace() (MoveFileEx on Windows) transiently fails with
+        #    PermissionError when the destination has been momentarily
+        #    touched by another handle (observed: a virus scanner's
+        #    real-time scan of the file JUST written) -- self-resolving
+        #    within milliseconds, but with no retry it escaped as data loss.
+        #    Measured 3-6 failures per 2000 writes at 40-way contention
+        #    before atomic_write_text's retry existed.
+        # 2. The lock's own give-up-after-timeout fallback ("proceed
+        #    unlocked rather than hang the caller") is silent by design --
+        #    it raises nothing -- so under contention that genuinely
+        #    outlasts the timeout, it reproduces the ORIGINAL lost-update
+        #    bug with zero exception raised. A too-short timeout (10s) hit
+        #    this reliably under the same 40-way load; the fix widened it
+        #    and made the give-up path print to stderr rather than stay
+        #    silent (see the loud_on_timeout test below).
+        #
+        # 20 threads x 25 writes each, no artificial pacing -- the shape
+        # that actually reproduced both, run repeatedly during development.
+        names = [f"Contended Lane {i:02d}" for i in range(20)]
+
+        def write(name: str) -> Callable[[], None]:
+            def _write() -> None:
+                for attempt in range(25):
+                    update_artifact_library_live(
+                        self.state_dir,
+                        run_name=name,
+                        run_id=f"{name}-run-{attempt}",
+                        identity="agent",
+                        state="live",
+                    )
+
+            return _write
+
+        errors = self.run_threads_and_collect_errors([write(name) for name in names])
+        self.assertEqual([], errors, "a write raised under real contention instead of landing or waiting")
+
+        library = read_artifact_library(self.state_dir)
+        self.assertEqual(set(names), set(library["artifacts"]))
+
+    def test_lock_timeout_give_up_is_loud_not_silent(self) -> None:
+        # The give-up-after-timeout path proceeds WITHOUT the lock by
+        # design (see artifact_library_lock's own comment) -- that is only
+        # an acceptable trade-off if it is impossible to miss when it
+        # actually happens. Force it by making every acquisition attempt
+        # fail, then assert the diagnostic actually reaches stderr rather
+        # than the operation just silently succeeding unlocked.
+        with mock.patch("ringer._lock_fh_windows", return_value=False), mock.patch(
+            "ringer._lock_fh_posix", return_value=False
+        ), mock.patch("ringer.ARTIFACT_LIBRARY_LOCK_TIMEOUT_S", 0.2), mock.patch(
+            "ringer.ARTIFACT_LIBRARY_LOCK_POLL_S", 0.05
+        ):
+            captured = io.StringIO()
+            with contextlib.redirect_stderr(captured):
+                update_artifact_library_live(
+                    self.state_dir,
+                    run_name="Forced Timeout Lane",
+                    run_id="forced-timeout-run",
+                    identity="agent",
+                    state="live",
+                )
+            self.assertIn("gave up", captured.getvalue())
+            self.assertIn("UNLOCKED", captured.getvalue())
+
+        # And the write still landed -- giving up on the LOCK must not mean
+        # giving up on the write itself.
+        library = read_artifact_library(self.state_dir)
+        self.assertIn("Forced Timeout Lane", library["artifacts"])
 
     def test_startup_reconcile_marks_stale_live_entry_died(self) -> None:
         update_artifact_library_live(

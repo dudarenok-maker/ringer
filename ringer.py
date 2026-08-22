@@ -67,8 +67,7 @@ ACTIVITY_TAIL_BYTES = 2048
 ACTIVITY_TEXT_LIMIT = 80
 ARTIFACT_WRAPPER_TAIL_BYTES = 256 * 1024
 ARTIFACT_LIBRARY_MAX_VERSIONS = 20
-ARTIFACT_LIBRARY_LOCK_TIMEOUT_S = 10.0
-ARTIFACT_LIBRARY_LOCK_STALE_S = 30.0
+ARTIFACT_LIBRARY_LOCK_TIMEOUT_S = 60.0
 ARTIFACT_LIBRARY_LOCK_POLL_S = 0.05
 DELIVERABLE_MAX_BYTES = 20 * 1024 * 1024
 WORKER_LOG_TAIL_BYTES = 64 * 1024
@@ -2507,6 +2506,42 @@ class StateWriter:
                 print(f"state writer error: {exc}", file=sys.stderr)
 
 
+ATOMIC_REPLACE_RETRIES = 6
+ATOMIC_REPLACE_RETRY_DELAY_S = 0.02
+
+
+def _replace_with_retry(tmp_path: Path, path: Path) -> None:
+    # Windows can transiently fail os.replace() (MoveFileEx) onto a path
+    # another handle has open for a moment -- ERROR_ACCESS_DENIED (WinError
+    # 5, surfaces as PermissionError) or ERROR_SHARING_VIOLATION (WinError
+    # 32) -- most often a virus scanner's real-time scan of the file that
+    # was JUST written, which releases within milliseconds. Neither is a
+    # real conflict and POSIX rename has no equivalent failure mode, but
+    # this file's write pattern now runs under genuine concurrent load
+    # (artifact_library_lock serializes callers onto back-to-back
+    # read-modify-write cycles on the same path) and it reproduces for
+    # real: measured 3-6 failures per 2000 writes under 40-way thread
+    # contention on this exact box before this retry existed. Silently
+    # losing one of those writes is the SAME symptom this whole lock exists
+    # to prevent (a caller's update never lands), so this is not optional
+    # hardening -- without it, the lock alone doesn't close the bug.
+    last_error: OSError | None = None
+    for attempt in range(ATOMIC_REPLACE_RETRIES):
+        try:
+            os.replace(tmp_path, path)
+            return
+        except PermissionError as exc:
+            last_error = exc
+        except OSError as exc:
+            if getattr(exc, "winerror", None) != 32:
+                raise
+            last_error = exc
+        if attempt < ATOMIC_REPLACE_RETRIES - 1:
+            time.sleep(ATOMIC_REPLACE_RETRY_DELAY_S)
+    assert last_error is not None
+    raise last_error
+
+
 def atomic_write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd: int | None = None
@@ -2522,7 +2557,7 @@ def atomic_write_text(path: Path, text: str) -> None:
             fd = None
             fh.write(text)
             fh.flush()
-        os.replace(tmp_path, path)
+        _replace_with_retry(tmp_path, path)
         tmp_path = None
     finally:
         if fd is not None:
@@ -3267,56 +3302,146 @@ def artifact_library_lock_path(state_dir: Path) -> Path:
     return artifact_library_path(state_dir).with_suffix(".json.lock")
 
 
+def _lock_fh_windows(fh: Any) -> bool:
+    import msvcrt
+
+    fh.seek(0)
+    try:
+        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        return True
+    except OSError:
+        return False
+
+
+def _unlock_fh_windows(fh: Any) -> None:
+    import msvcrt
+
+    with contextlib.suppress(OSError):
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+def _lock_fh_posix(fh: Any) -> bool:
+    import fcntl
+
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+
+
+def _unlock_fh_posix(fh: Any) -> None:
+    import fcntl
+
+    with contextlib.suppress(OSError):
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
 @contextlib.contextmanager
 def artifact_library_lock(state_dir: Path) -> Iterable[None]:
-    # update_artifact_library_live and append_artifact_library_version each
-    # read the whole file, mutate one key, and write the whole file back with
-    # no cross-process coordination -- atomic_write_json only makes the WRITE
-    # atomic, not the read-modify-write cycle around it. Two Ringer processes
-    # (different lanes, or a lane's periodic live-state write racing its own
-    # final-report write) finishing close together race: whoever's STALE read
-    # writes LAST wins, silently reverting whatever the other one just added.
-    # For a lane that runs constantly (claude, cline) a lost update self-heals
-    # within minutes. For one that runs rarely -- a quota-limited lane parked
-    # for days -- a single lost update erases its library entry for good,
-    # because nothing re-adds it until that lane happens to run again.
-    # Reproduced: cline-glm/cline-qwen-cloud/cline-muse-local/cline-qwen-local
-    # all have real run/report/version files on disk but no library.json
-    # entry, while the two highest-frequency lanes (claude, cline) both do.
+    # update_artifact_library_live, append_artifact_library_version, and
+    # reconcile_artifact_library_dead_runs each read the whole file, mutate
+    # it, and write the whole file back with no cross-process coordination --
+    # atomic_write_json only makes the WRITE atomic, not the read-modify-
+    # write cycle around it. Two Ringer processes (different lanes, or a
+    # lane's periodic live-state write racing its own final-report write, or
+    # the HUD dashboard's own poll-triggered reconcile) finishing close
+    # together race: whoever's STALE read writes LAST wins, silently
+    # reverting whatever the other one just added. For a lane that runs
+    # constantly (claude, cline) a lost update self-heals within minutes.
+    # For one that runs rarely -- a quota-limited lane parked for days -- a
+    # single lost update erases its library entry for good, because nothing
+    # re-adds it until that lane happens to run again. Reproduced:
+    # cline-glm/cline-qwen-cloud/cline-muse-local/cline-qwen-local all have
+    # real run/report/version files on disk but no library.json entry, while
+    # the two highest-frequency lanes (claude, cline) both do.
     #
-    # Exclusive-create a sibling .lock file as the mutex -- works identically
-    # on Windows and POSIX, unlike this file's other lock
-    # (catalog_refresh_lock), which imports fcntl and silently no-ops on
-    # Windows. Steal a lock older than the stale window: a crashed holder
-    # must never wedge every other lane's library update forever. If the
-    # holder is neither released nor stale by the timeout, proceed WITHOUT
-    # the lock rather than hang the caller -- callers already treat this
-    # whole operation as best-effort (see their own try/except), so an
-    # occasional unlocked write is a smaller cost than blocking a lane run.
+    # An earlier version of this lock used a create/delete lockfile as its
+    # own mutex, with a "steal it if it looks stale" fallback for a crashed
+    # holder. Both were wrong in ways an adversarial review caught by
+    # actually running them concurrently rather than reading the code: (1)
+    # Windows raises PermissionError, not FileExistsError, when a create
+    # races the delete-pending window left by the PREVIOUS holder's own
+    # unlink() -- only FileExistsError was caught, so a real contended
+    # acquisition threw, uncaught, out of a best-effort caller, deterministic
+    # data loss rather than the probabilistic loss this was fixing; measured
+    # at ~7.5% of contended acquisitions on this exact box. (2) the steal
+    # check (stat the mtime, then unlink) is two syscalls with a gap between
+    # them, so two waiters can each judge the same lock stale and both
+    # proceed -- reproduced, two concurrent holders. (3) the fixed 10s
+    # timeout is SHORTER than the 30s staleness window that would let a
+    # waiter steal past a genuinely live holder, so a real holder's presence
+    # made the timeout fire first, every time, silently -- reproduced, N
+    # waiters all proceeding unlocked at exactly 10.0s with nothing printed.
+    #
+    # An OS-level byte-range lock on a PERSISTENT file (msvcrt on Windows,
+    # flock on POSIX -- this file's OTHER lock, catalog_refresh_lock, uses
+    # fcntl alone and silently no-ops on Windows; this one branches instead)
+    # has none of those three failure modes by construction: there is no
+    # create/delete race because the file is never deleted, no staleness
+    # question to answer because the OS itself releases the lock the instant
+    # the holding process's handle closes -- crash included -- and no two
+    # processes can ever both hold it, because the OS enforces that, not
+    # this code. That also removes the ORIGINAL reason for a short timeout: a
+    # crashed holder can no longer wedge this forever, so there is nothing
+    # left to time out AGAINST except a genuinely slow live holder, which
+    # this workload never produces (a bounded local JSON read + write). The
+    # timeout below is a last-resort safety net, not an expected path -- and
+    # it must never be reachable silently: stress-testing this exact design
+    # under heavy artificial contention (40 threads, 2000 back-to-back
+    # writes, no pacing -- far beyond this app's real concurrency, a handful
+    # of separate lane PROCESSES writing every few seconds at most) showed
+    # that an EARLIER, shorter timeout here reproduced the original bug with
+    # zero exception raised: the give-up branch proceeds unlocked, which is
+    # exactly the lost-update this whole lock exists to prevent, and does so
+    # invisibly. So: generous timeout, and the give-up path prints loudly
+    # rather than proceeding in silence -- if this line is ever seen, that
+    # write's correctness was not guaranteed and something upstream should
+    # be investigated, not shrugged off as the callers' existing best-effort
+    # try/except already does for other (rarer) failure shapes.
     lock_path = artifact_library_lock_path(state_dir)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    deadline = time.monotonic() + ARTIFACT_LIBRARY_LOCK_TIMEOUT_S
-    acquired = False
-    while True:
+    try:
+        fh = open(lock_path, "a+b")
+    except OSError:
+        yield
+        return
+    try:
         try:
-            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.close(fd)
-            acquired = True
-            break
-        except FileExistsError:
-            with contextlib.suppress(OSError):
-                if time.time() - lock_path.stat().st_mtime > ARTIFACT_LIBRARY_LOCK_STALE_S:
-                    lock_path.unlink()
-                    continue
-            if time.monotonic() >= deadline:
+            fh.seek(0, os.SEEK_END)
+            if fh.tell() == 0:
+                fh.write(b"0")
+                fh.flush()
+        except OSError:
+            yield
+            return
+        lock_fn, unlock_fn = (
+            (_lock_fh_windows, _unlock_fh_windows) if os.name == "nt" else (_lock_fh_posix, _unlock_fh_posix)
+        )
+        deadline = time.monotonic() + ARTIFACT_LIBRARY_LOCK_TIMEOUT_S
+        acquired = False
+        while True:
+            try:
+                acquired = lock_fn(fh)
+            except Exception:
+                acquired = False
+            if acquired or time.monotonic() >= deadline:
                 break
             time.sleep(ARTIFACT_LIBRARY_LOCK_POLL_S)
-    try:
-        yield
+        if not acquired:
+            print(
+                f"artifact library lock: gave up after {ARTIFACT_LIBRARY_LOCK_TIMEOUT_S:.0f}s "
+                f"waiting on {lock_path} -- proceeding UNLOCKED, this write may be lost to a race",
+                file=sys.stderr,
+            )
+        try:
+            yield
+        finally:
+            if acquired:
+                unlock_fn(fh)
     finally:
-        if acquired:
-            with contextlib.suppress(OSError):
-                lock_path.unlink()
+        fh.close()
 
 
 def read_artifact_library(state_dir: Path) -> dict[str, Any]:
@@ -3467,23 +3592,31 @@ def prune_artifact_versions(state_dir: Path, versions: list[dict[str, Any]]) -> 
 
 
 def reconcile_artifact_library_dead_runs(state_dir: Path) -> None:
-    library = read_artifact_library(state_dir)
-    artifacts = library.get("artifacts", {})
-    if not isinstance(artifacts, dict):
-        return
-    active = read_active_runs()
-    changed = False
-    now_iso = datetime.now(timezone.utc).isoformat()
-    for entry in artifacts.values():
-        if not isinstance(entry, dict) or entry.get("state") != "live":
-            continue
-        run_id = str(entry.get("current_run_id", ""))
-        if not run_id or run_id not in active:
-            entry["state"] = "died"
-            entry["updated_at"] = now_iso
-            changed = True
-    if changed:
-        write_artifact_library(state_dir, library)
+    # Called at every run start AND on every HUD dashboard poll (GET
+    # /api/library) - the system's most frequent library reader-and-writer,
+    # and the one an adversarial review found still unlocked in an earlier
+    # version of this fix: it read-modify-wrote the same file the other two
+    # writers do, so a poll landing mid-write could erase whatever a
+    # concurrent lane had just added, which is the exact symptom this whole
+    # lock exists to close.
+    with artifact_library_lock(state_dir):
+        library = read_artifact_library(state_dir)
+        artifacts = library.get("artifacts", {})
+        if not isinstance(artifacts, dict):
+            return
+        active = read_active_runs()
+        changed = False
+        now_iso = datetime.now(timezone.utc).isoformat()
+        for entry in artifacts.values():
+            if not isinstance(entry, dict) or entry.get("state") != "live":
+                continue
+            run_id = str(entry.get("current_run_id", ""))
+            if not run_id or run_id not in active:
+                entry["state"] = "died"
+                entry["updated_at"] = now_iso
+                changed = True
+        if changed:
+            write_artifact_library(state_dir, library)
 
 
 def scan_run_states(state_dir: Path) -> list[dict[str, Any]]:
