@@ -67,6 +67,9 @@ ACTIVITY_TAIL_BYTES = 2048
 ACTIVITY_TEXT_LIMIT = 80
 ARTIFACT_WRAPPER_TAIL_BYTES = 256 * 1024
 ARTIFACT_LIBRARY_MAX_VERSIONS = 20
+ARTIFACT_LIBRARY_LOCK_TIMEOUT_S = 10.0
+ARTIFACT_LIBRARY_LOCK_STALE_S = 30.0
+ARTIFACT_LIBRARY_LOCK_POLL_S = 0.05
 DELIVERABLE_MAX_BYTES = 20 * 1024 * 1024
 WORKER_LOG_TAIL_BYTES = 64 * 1024
 TASK_REPORT_FILENAMES = ("report.md", "report.html")
@@ -3260,6 +3263,62 @@ def artifact_deliverables_dir(state_dir: Path, run_id: str, task_key: str) -> Pa
     )
 
 
+def artifact_library_lock_path(state_dir: Path) -> Path:
+    return artifact_library_path(state_dir).with_suffix(".json.lock")
+
+
+@contextlib.contextmanager
+def artifact_library_lock(state_dir: Path) -> Iterable[None]:
+    # update_artifact_library_live and append_artifact_library_version each
+    # read the whole file, mutate one key, and write the whole file back with
+    # no cross-process coordination -- atomic_write_json only makes the WRITE
+    # atomic, not the read-modify-write cycle around it. Two Ringer processes
+    # (different lanes, or a lane's periodic live-state write racing its own
+    # final-report write) finishing close together race: whoever's STALE read
+    # writes LAST wins, silently reverting whatever the other one just added.
+    # For a lane that runs constantly (claude, cline) a lost update self-heals
+    # within minutes. For one that runs rarely -- a quota-limited lane parked
+    # for days -- a single lost update erases its library entry for good,
+    # because nothing re-adds it until that lane happens to run again.
+    # Reproduced: cline-glm/cline-qwen-cloud/cline-muse-local/cline-qwen-local
+    # all have real run/report/version files on disk but no library.json
+    # entry, while the two highest-frequency lanes (claude, cline) both do.
+    #
+    # Exclusive-create a sibling .lock file as the mutex -- works identically
+    # on Windows and POSIX, unlike this file's other lock
+    # (catalog_refresh_lock), which imports fcntl and silently no-ops on
+    # Windows. Steal a lock older than the stale window: a crashed holder
+    # must never wedge every other lane's library update forever. If the
+    # holder is neither released nor stale by the timeout, proceed WITHOUT
+    # the lock rather than hang the caller -- callers already treat this
+    # whole operation as best-effort (see their own try/except), so an
+    # occasional unlocked write is a smaller cost than blocking a lane run.
+    lock_path = artifact_library_lock_path(state_dir)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + ARTIFACT_LIBRARY_LOCK_TIMEOUT_S
+    acquired = False
+    while True:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            acquired = True
+            break
+        except FileExistsError:
+            with contextlib.suppress(OSError):
+                if time.time() - lock_path.stat().st_mtime > ARTIFACT_LIBRARY_LOCK_STALE_S:
+                    lock_path.unlink()
+                    continue
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(ARTIFACT_LIBRARY_LOCK_POLL_S)
+    try:
+        yield
+    finally:
+        if acquired:
+            with contextlib.suppress(OSError):
+                lock_path.unlink()
+
+
 def read_artifact_library(state_dir: Path) -> dict[str, Any]:
     path = artifact_library_path(state_dir)
     try:
@@ -3325,19 +3384,20 @@ def update_artifact_library_live(
     now: datetime | None = None,
 ) -> None:
     now_iso = (now or datetime.now(timezone.utc)).isoformat()
-    library = read_artifact_library(state_dir)
-    artifacts = library.setdefault("artifacts", {})
-    existing = artifacts.get(run_name) if isinstance(artifacts.get(run_name), dict) else None
-    artifacts[run_name] = _library_entry(
-        state_dir=state_dir,
-        run_name=run_name,
-        run_id=run_id,
-        identity=identity,
-        state=state,
-        now_iso=now_iso,
-        existing=existing,
-    )
-    write_artifact_library(state_dir, library)
+    with artifact_library_lock(state_dir):
+        library = read_artifact_library(state_dir)
+        artifacts = library.setdefault("artifacts", {})
+        existing = artifacts.get(run_name) if isinstance(artifacts.get(run_name), dict) else None
+        artifacts[run_name] = _library_entry(
+            state_dir=state_dir,
+            run_name=run_name,
+            run_id=run_id,
+            identity=identity,
+            state=state,
+            now_iso=now_iso,
+            existing=existing,
+        )
+        write_artifact_library(state_dir, library)
 
 
 def append_artifact_library_version(
@@ -3355,35 +3415,36 @@ def append_artifact_library_version(
     now: datetime | None = None,
 ) -> None:
     now_iso = (now or datetime.now(timezone.utc)).isoformat()
-    library = read_artifact_library(state_dir)
-    artifacts = library.setdefault("artifacts", {})
-    existing = artifacts.get(run_name) if isinstance(artifacts.get(run_name), dict) else None
-    entry = _library_entry(
-        state_dir=state_dir,
-        run_name=run_name,
-        run_id=run_id,
-        identity=identity,
-        state=outcome,
-        now_iso=now_iso,
-        existing=existing,
-    )
-    new_version = {
-        "run_id": run_id,
-        "path": str(version_path),
-        "report_path": str(report_path) if report_path is not None else None,
-        "finished_at": now_iso,
-        "outcome": outcome,
-        "tasks_pass": tasks_pass,
-        "tasks_fail": tasks_fail,
-        "deliverables": [dict(item) for item in deliverables or []],
-    }
-    versions = [new_version]
-    for version in entry["versions"]:
-        if version.get("run_id") != run_id:
-            versions.append(version)
-    entry["versions"] = versions[:ARTIFACT_LIBRARY_MAX_VERSIONS]
-    artifacts[run_name] = entry
-    write_artifact_library(state_dir, library)
+    with artifact_library_lock(state_dir):
+        library = read_artifact_library(state_dir)
+        artifacts = library.setdefault("artifacts", {})
+        existing = artifacts.get(run_name) if isinstance(artifacts.get(run_name), dict) else None
+        entry = _library_entry(
+            state_dir=state_dir,
+            run_name=run_name,
+            run_id=run_id,
+            identity=identity,
+            state=outcome,
+            now_iso=now_iso,
+            existing=existing,
+        )
+        new_version = {
+            "run_id": run_id,
+            "path": str(version_path),
+            "report_path": str(report_path) if report_path is not None else None,
+            "finished_at": now_iso,
+            "outcome": outcome,
+            "tasks_pass": tasks_pass,
+            "tasks_fail": tasks_fail,
+            "deliverables": [dict(item) for item in deliverables or []],
+        }
+        versions = [new_version]
+        for version in entry["versions"]:
+            if version.get("run_id") != run_id:
+                versions.append(version)
+        entry["versions"] = versions[:ARTIFACT_LIBRARY_MAX_VERSIONS]
+        artifacts[run_name] = entry
+        write_artifact_library(state_dir, library)
     prune_artifact_versions(state_dir, versions[ARTIFACT_LIBRARY_MAX_VERSIONS:])
 
 
