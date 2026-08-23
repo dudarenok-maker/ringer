@@ -910,5 +910,53 @@ class LanesPanelBrowserBehaviorTests(unittest.TestCase):
         self.assertIn(f"paused til {out['expectedDate']}", out["html"])
 
 
+class ReadOpenEngineDoctorHealthTests(unittest.TestCase):
+    def test_valid_json_any_exit_code_is_returned(self):
+        def fake_runner(*args, **kwargs):
+            return subprocess.CompletedProcess(
+                args=args[0], returncode=1,
+                stdout='{"generated_utc": "x", "tickets": [], "errors": [], "partial": false}',
+                stderr="",
+            )
+        result = ringer.read_open_engine_doctor_health(
+            oe_home=Path("C:/Claude/open-engine"), repo="dudarenok-maker/Castwright",
+            timeout=30, runner=fake_runner,
+        )
+        self.assertEqual(result["tickets"], [])
+        self.assertFalse(result["partial"])
+
+    def test_empty_stdout_with_param_binding_error_reads_as_version_skew(self):
+        def fake_runner(*args, **kwargs):
+            return subprocess.CompletedProcess(
+                args=args[0], returncode=1, stdout="",
+                stderr="A parameter cannot be found that matches parameter name 'Json'.",
+            )
+        result = ringer.read_open_engine_doctor_health(
+            oe_home=Path("C:/Claude/open-engine"), repo="dudarenok-maker/Castwright",
+            timeout=30, runner=fake_runner,
+        )
+        self.assertIn("predates -Json support", result["error"])
+
+    def test_anything_else_is_a_generic_error(self):
+        def fake_runner(*args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd="oe-doctor.ps1", timeout=30)
+        result = ringer.read_open_engine_doctor_health(
+            oe_home=Path("C:/Claude/open-engine"), repo="dudarenok-maker/Castwright",
+            timeout=30, runner=fake_runner,
+        )
+        self.assertIn("error", result)
+
+    def test_malformed_json_with_no_param_binding_error_is_a_generic_error(self):
+        def fake_runner(*args, **kwargs):
+            return subprocess.CompletedProcess(
+                args=args[0], returncode=1, stdout="not json", stderr="",
+            )
+        result = ringer.read_open_engine_doctor_health(
+            oe_home=Path("C:/Claude/open-engine"), repo="dudarenok-maker/Castwright",
+            timeout=30, runner=fake_runner,
+        )
+        self.assertIn("error", result)
+
+
 if __name__ == "__main__":
     unittest.main()

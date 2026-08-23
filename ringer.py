@@ -5574,6 +5574,36 @@ def inject_models_tab_into_ringside_html(html: str) -> str:
     return html
 
 
+def read_open_engine_doctor_health(
+    oe_home: Path,
+    repo: str,
+    timeout: float = 60.0,
+    runner: Any = subprocess.run,
+) -> dict[str, Any]:
+    doctor_script = oe_home / "bin" / "oe-doctor.ps1"
+    try:
+        proc = runner(
+            [
+                "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                "-File", str(doctor_script), "-Json", "-Repo", repo,
+            ],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except Exception as exc:
+        return {"error": str(exc) or exc.__class__.__name__}
+
+    stdout = (proc.stdout or "").strip()
+    if stdout:
+        try:
+            return json.loads(stdout)
+        except json.JSONDecodeError:
+            pass
+    stderr = proc.stderr or ""
+    if not stdout and "parameter cannot be found that matches parameter name" in stderr:
+        return {"error": "open-engine checkout predates -Json support"}
+    return {"error": stderr.strip() or f"oe-doctor.ps1 -Json produced no parseable output (exit {proc.returncode})"}
+
+
 def read_ringside_html() -> str:
     try:
         html = RINGSIDE_HTML_PATH.read_text(encoding="utf-8")
@@ -5847,6 +5877,15 @@ class PersistentHudServer:
                             self.send_error(HTTPStatus.NOT_IMPLEMENTED)
                     except Exception:
                         self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR)
+                    return
+                if path == "/api/oe-health":
+                    send_json_response(
+                        self,
+                        read_open_engine_doctor_health(
+                            oe_home=Path("C:/Claude/open-engine"),
+                            repo="dudarenok-maker/Castwright",
+                        ),
+                    )
                     return
                 if path == "/api/library":
                     # A run that died without cleanup must not sit "live"
