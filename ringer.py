@@ -5617,11 +5617,14 @@ def inject_health_panel_into_ringside_html(html: str) -> str:
         try {
           const res = await fetch("/api/oe-health");
           const data = await res.json();
-          tbody.innerHTML = "";
-          if (data.error) {
+          // Every branch below writes SOMETHING to tbody before returning -
+          // a failed re-check must never leave the PREVIOUS verdict on
+          // screen with no indication the refresh didn't happen.
+          if (data && typeof data === "object" && data.error) {
             tbody.innerHTML = `<tr><td colspan="5">${html(data.error)}</td></tr>`;
-          } else {
-            for (const t of (data.tickets || [])) {
+          } else if (data && Array.isArray(data.tickets)) {
+            tbody.innerHTML = "";
+            for (const t of data.tickets) {
               const row = document.createElement("tr");
               if (data.partial) row.classList.add("health-row-partial");
               row.innerHTML = [
@@ -5633,7 +5636,12 @@ def inject_health_panel_into_ringside_html(html: str) -> str:
               ].join("");
               tbody.appendChild(row);
             }
+          } else {
+            tbody.innerHTML = `<tr><td colspan="5">${html("unrecognized response from /api/oe-health")}</td></tr>`;
           }
+          table.hidden = false;
+        } catch (err) {
+          tbody.innerHTML = `<tr><td colspan="5">${html(String(err && err.message || err))}</td></tr>`;
           table.hidden = false;
         } finally {
           btn.disabled = false;
@@ -5646,6 +5654,9 @@ def inject_health_panel_into_ringside_html(html: str) -> str:
     html_out = html_out.replace(main_open_anchor, main_open_anchor + panel, 1)
     html_out = html_out.replace(script_anchor, script_anchor + script, 1)
     return html_out
+
+
+_OE_HEALTH_LOCK = threading.Lock()
 
 
 def read_open_engine_doctor_health(
@@ -5662,18 +5673,36 @@ def read_open_engine_doctor_health(
                 "-File", str(doctor_script), "-Json", "-Repo", repo,
             ],
             capture_output=True, text=True, timeout=timeout,
+            # PowerShell writes UTF-8; without an explicit encoding= here,
+            # text=True decodes with locale.getpreferredencoding() (cp1252 on
+            # a default Windows box), which either mangles any non-ASCII
+            # character in a finding's evidence text or - worse - raises
+            # UnicodeDecodeError on subprocess's own reader thread, where this
+            # function's try/except never sees it: subprocess.run then
+            # returns normally with stdout=None and returncode=0, and a
+            # successful run gets reported as "produced no parseable output".
+            encoding="utf-8", errors="replace",
         )
+    except subprocess.TimeoutExpired:
+        # subprocess.TimeoutExpired's own __str__ embeds the full argv,
+        # including doctor_script's absolute local path - don't let that
+        # local filesystem detail reach the browser tab this renders into.
+        return {"error": f"oe-doctor.ps1 -Json timed out after {timeout:.0f}s"}
     except Exception as exc:
-        return {"error": str(exc) or exc.__class__.__name__}
+        return {"error": exc.__class__.__name__}
 
     stdout = (proc.stdout or "").strip()
     if stdout:
         try:
-            return json.loads(stdout)
+            payload = json.loads(stdout)
         except json.JSONDecodeError:
-            pass
+            snippet = stdout[:200]
+            return {"error": f"oe-doctor.ps1 -Json produced unparseable output: {snippet!r}"}
+        if isinstance(payload, dict) and isinstance(payload.get("tickets"), list):
+            return payload
+        return {"error": f"oe-doctor.ps1 -Json produced an unrecognized response shape: {stdout[:200]!r}"}
     stderr = proc.stderr or ""
-    if not stdout and "parameter cannot be found that matches parameter name" in stderr:
+    if not stdout and "parameter cannot be found" in stderr and "'Json'" in stderr:
         return {"error": "open-engine checkout predates -Json support"}
     return {"error": stderr.strip() or f"oe-doctor.ps1 -Json produced no parseable output (exit {proc.returncode})"}
 
@@ -5954,13 +5983,26 @@ class PersistentHudServer:
                         self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR)
                     return
                 if path == "/api/oe-health":
-                    send_json_response(
-                        self,
-                        read_open_engine_doctor_health(
-                            oe_home=Path("C:/Claude/open-engine"),
-                            repo="dudarenok-maker/Castwright",
-                        ),
-                    )
+                    # Each check spawns a 60s-budget powershell.exe subprocess
+                    # with no client-side rate limit the server can trust (any
+                    # page open in the operator's browser can loop this GET).
+                    # Serialize instead of spawning unboundedly - a check
+                    # already running is answered with the same "in
+                    # progress" shape the client already renders as a table
+                    # row, not a second concurrent process.
+                    if _OE_HEALTH_LOCK.acquire(blocking=False):
+                        try:
+                            send_json_response(
+                                self,
+                                read_open_engine_doctor_health(
+                                    oe_home=Path("C:/Claude/open-engine"),
+                                    repo="dudarenok-maker/Castwright",
+                                ),
+                            )
+                        finally:
+                            _OE_HEALTH_LOCK.release()
+                    else:
+                        send_json_response(self, {"error": "a health check is already in progress"})
                     return
                 if path == "/api/library":
                     # A run that died without cleanup must not sit "live"

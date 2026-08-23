@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import unittest.mock
@@ -937,6 +938,21 @@ class ReadOpenEngineDoctorHealthTests(unittest.TestCase):
         )
         self.assertIn("predates -Json support", result["error"])
 
+    def test_unrelated_param_binding_error_is_not_misread_as_version_skew(self):
+        # A doctor that HAS -Json but is missing some other parameter (or
+        # any unrelated PowerShell parameter-binding error) must not be
+        # reported as "predates -Json support" - that's a false diagnosis.
+        def fake_runner(*args, **kwargs):
+            return subprocess.CompletedProcess(
+                args=args[0], returncode=1, stdout="",
+                stderr="A parameter cannot be found that matches parameter name 'Repo'.",
+            )
+        result = ringer.read_open_engine_doctor_health(
+            oe_home=Path("C:/Claude/open-engine"), repo="dudarenok-maker/Castwright",
+            timeout=30, runner=fake_runner,
+        )
+        self.assertNotIn("predates -Json support", result["error"])
+
     def test_anything_else_is_a_generic_error(self):
         def fake_runner(*args, **kwargs):
             raise subprocess.TimeoutExpired(cmd="oe-doctor.ps1", timeout=30)
@@ -945,6 +961,19 @@ class ReadOpenEngineDoctorHealthTests(unittest.TestCase):
             timeout=30, runner=fake_runner,
         )
         self.assertIn("error", result)
+
+    def test_timeout_error_does_not_leak_the_local_script_path(self):
+        # subprocess.TimeoutExpired.__str__ embeds the full argv, including
+        # doctor_script's absolute local path - that must never reach the
+        # browser tab this error renders into.
+        def fake_runner(*args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd=args[0], timeout=30)
+        result = ringer.read_open_engine_doctor_health(
+            oe_home=Path("C:/Claude/open-engine"), repo="dudarenok-maker/Castwright",
+            timeout=30, runner=fake_runner,
+        )
+        self.assertNotIn("C:/Claude/open-engine", result["error"])
+        self.assertNotIn("C:\\Claude\\open-engine", result["error"])
 
     def test_malformed_json_with_no_param_binding_error_is_a_generic_error(self):
         def fake_runner(*args, **kwargs):
@@ -956,6 +985,61 @@ class ReadOpenEngineDoctorHealthTests(unittest.TestCase):
             timeout=30, runner=fake_runner,
         )
         self.assertIn("error", result)
+
+    def test_a_json_value_with_no_tickets_list_is_an_error_not_a_clean_bill_of_health(self):
+        # A top-level JSON array, an empty object, or a doctor that renames
+        # its own key must not render as "the doctor ran and found nothing
+        # wrong" - that's the one unforgivable bug class per CONTRIBUTING.md
+        # ("Displayed data must be true").
+        for bad_stdout in ("[]", "{}", '{"findings": []}', "null", "42"):
+            with self.subTest(stdout=bad_stdout):
+                def fake_runner(*args, **kwargs):
+                    return subprocess.CompletedProcess(
+                        args=args[0], returncode=0, stdout=bad_stdout, stderr="",
+                    )
+                result = ringer.read_open_engine_doctor_health(
+                    oe_home=Path("C:/Claude/open-engine"), repo="dudarenok-maker/Castwright",
+                    timeout=30, runner=fake_runner,
+                )
+                self.assertIn("error", result)
+                self.assertNotIn("tickets", result)
+
+    def test_oe_health_lock_is_a_non_reentrant_single_flight_guard(self):
+        # /api/oe-health has no client-enforced rate limit the server can
+        # trust (any page open in the operator's browser can loop the GET),
+        # and each check spawns a 60s-budget subprocess - the route
+        # serializes through this lock rather than spawning unboundedly.
+        # This pins the mechanic the route relies on: a second non-blocking
+        # acquire while one is held must fail, not queue silently.
+        self.assertIsInstance(ringer._OE_HEALTH_LOCK, type(threading.Lock()))
+        acquired_first = ringer._OE_HEALTH_LOCK.acquire(blocking=False)
+        try:
+            self.assertTrue(acquired_first)
+            acquired_second = ringer._OE_HEALTH_LOCK.acquire(blocking=False)
+            self.assertFalse(acquired_second)
+        finally:
+            ringer._OE_HEALTH_LOCK.release()
+
+    def test_runner_is_called_with_explicit_utf8_decoding(self):
+        # PowerShell writes UTF-8; without an explicit encoding= here,
+        # text=True decodes with locale.getpreferredencoding() (cp1252 on a
+        # default Windows box), which mangles non-ASCII evidence text or, on
+        # an undecodable byte, raises UnicodeDecodeError on subprocess's own
+        # reader thread - where a successful run then gets reported as
+        # "produced no parseable output" instead of the real payload.
+        captured_kwargs = {}
+
+        def fake_runner(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            return subprocess.CompletedProcess(
+                args=args[0], returncode=0, stdout='{"tickets": []}', stderr="",
+            )
+        ringer.read_open_engine_doctor_health(
+            oe_home=Path("C:/Claude/open-engine"), repo="dudarenok-maker/Castwright",
+            timeout=30, runner=fake_runner,
+        )
+        self.assertEqual(captured_kwargs.get("encoding"), "utf-8")
+        self.assertEqual(captured_kwargs.get("errors"), "replace")
 
 
 class InjectHealthPanelTests(unittest.TestCase):
@@ -976,14 +1060,71 @@ class InjectHealthPanelTests(unittest.TestCase):
         twice = ringer.inject_health_panel_into_ringside_html(once)
         self.assertEqual(once, twice)
 
-    def test_no_op_when_an_anchor_is_missing(self):
+    def test_missing_style_anchor_is_a_full_no_op_not_a_partial_injection(self):
+        # Checking only the <main>/script anchors and firing three
+        # independent .replace() calls would let a renamed CSS selector ship
+        # an unstyled panel with the guard reporting nothing wrong.
+        broken = self._base_html().replace("    main {\n", "    main{\n")
+        result = ringer.inject_health_panel_into_ringside_html(broken)
+        self.assertEqual(result, broken)
+        self.assertNotIn('id="health-panel"', result)
+
+    def test_missing_main_anchor_is_a_full_no_op_not_a_partial_injection(self):
+        broken = self._base_html().replace("    <main>\n", "    <main >\n")
+        result = ringer.inject_health_panel_into_ringside_html(broken)
+        self.assertEqual(result, broken)
+        self.assertNotIn('id="health-panel"', result)
+
+    def test_missing_script_anchor_is_a_full_no_op_not_a_partial_injection(self):
         broken = self._base_html().replace("tickClock();", "")
         result = ringer.inject_health_panel_into_ringside_html(broken)
+        self.assertEqual(result, broken)
         self.assertNotIn('id="health-panel"', result)
 
     def test_renders_a_visual_distinction_for_partial_rows(self):
         result = ringer.inject_health_panel_into_ringside_html(self._base_html())
-        self.assertIn("partial", result.lower())
+        self.assertIn(".health-row-partial { opacity: .6; }", result)
+        self.assertIn('row.classList.add("health-row-partial")', result)
+
+    def test_every_dynamic_ticket_field_is_escaped_before_interpolation(self):
+        # Guards against the html() wrapper being dropped from any one field
+        # - untested escaping was the review's top significant finding,
+        # since this codebase's own rule is "worker output is untrusted
+        # text" and evidence/fix text ultimately comes from the doctor.
+        result = ringer.inject_health_panel_into_ringside_html(self._base_html())
+        for field in ("t.number", "t.severity", "t.kind", "t.evidence", "t.fix"):
+            self.assertIn(f"${{html({field})}}", result)
+        self.assertIn("${html(data.error)}", result)
+
+    def test_a_failed_recheck_never_leaves_a_stale_verdict_on_screen(self):
+        # Every branch of the click handler must write to tbody before
+        # returning, including the catch - a re-check that throws (bad JSON,
+        # a network error) must not leave the PREVIOUS successful verdict
+        # displayed with no indication the refresh failed.
+        result = ringer.inject_health_panel_into_ringside_html(self._base_html())
+        handler_start = result.index("btn.addEventListener")
+        handler = result[handler_start:result.index("installHealthPanel();", handler_start)]
+        self.assertIn("} catch (err) {", handler)
+        self.assertIn("tbody.innerHTML", handler[handler.index("catch (err)"):])
+
+    def test_unrecognized_response_shape_does_not_render_as_a_clean_bill_of_health(self):
+        # A response that is neither {error: ...} nor {tickets: [...]} must
+        # not fall through to an empty, error-free table - that reads as
+        # "checked, nothing wrong" when the endpoint actually failed.
+        result = ringer.inject_health_panel_into_ringside_html(self._base_html())
+        self.assertIn("Array.isArray(data.tickets)", result)
+        self.assertIn("unrecognized response", result)
+
+    def test_injects_cleanly_into_the_real_ringside_html(self):
+        # Every test above runs against a synthetic fixture. The three
+        # anchors this injector depends on are real strings in a real,
+        # independently-maintained file (dashboard/ringside.html) that other
+        # work can rename without ever touching this file - this is the one
+        # test that would actually catch that.
+        real_html = ringer.RINGSIDE_HTML_PATH.read_text(encoding="utf-8")
+        injected = ringer.inject_health_panel_into_ringside_html(real_html)
+        self.assertIn('id="health-panel"', injected)
+        self.assertIn("installHealthPanel();", injected)
 
 
 if __name__ == "__main__":
