@@ -958,5 +958,33 @@ class ReadOpenEngineDoctorHealthTests(unittest.TestCase):
         self.assertIn("error", result)
 
 
+class InjectHealthPanelTests(unittest.TestCase):
+    def _base_html(self) -> str:
+        return (
+            "<style>\n    main {\n    }\n</style>\n"
+            "<body>\n    <main>\n    </main>\n"
+            "<script>\n    tickClock();\n</script>\n</body>"
+        )
+
+    def test_injects_the_button_and_table_container(self):
+        result = ringer.inject_health_panel_into_ringside_html(self._base_html())
+        self.assertIn('id="health-panel"', result)
+        self.assertIn("Check Health", result)
+
+    def test_idempotent_on_already_injected_html(self):
+        once = ringer.inject_health_panel_into_ringside_html(self._base_html())
+        twice = ringer.inject_health_panel_into_ringside_html(once)
+        self.assertEqual(once, twice)
+
+    def test_no_op_when_an_anchor_is_missing(self):
+        broken = self._base_html().replace("tickClock();", "")
+        result = ringer.inject_health_panel_into_ringside_html(broken)
+        self.assertNotIn('id="health-panel"', result)
+
+    def test_renders_a_visual_distinction_for_partial_rows(self):
+        result = ringer.inject_health_panel_into_ringside_html(self._base_html())
+        self.assertIn("partial", result.lower())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -5574,6 +5574,80 @@ def inject_models_tab_into_ringside_html(html: str) -> str:
     return html
 
 
+def inject_health_panel_into_ringside_html(html: str) -> str:
+    style_anchor = "    main {\n"
+    main_open_anchor = "    <main>\n"
+    script_anchor = "    tickClock();\n"
+    if (
+        'id="health-panel"' in html
+        or style_anchor not in html
+        or main_open_anchor not in html
+        or script_anchor not in html
+    ):
+        return html
+    style = """
+    .health-row-partial { opacity: .6; }
+"""
+    panel = """      <section id="health-panel" class="mono">
+        <button id="health-check-btn" type="button">Check Health</button>
+        <table id="health-table" hidden>
+          <thead><tr><th>#</th><th>Severity</th><th>Kind</th><th>Evidence</th><th>Fix</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </section>
+"""
+    script = r"""
+    function installHealthPanel() {
+      const btn = document.getElementById("health-check-btn");
+      const table = document.getElementById("health-table");
+      const tbody = table ? table.querySelector("tbody") : null;
+      if (!btn || !table || !tbody) return;
+
+      function html(value) {
+        return String(value ?? "")
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#39;");
+      }
+
+      btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        try {
+          const res = await fetch("/api/oe-health");
+          const data = await res.json();
+          tbody.innerHTML = "";
+          if (data.error) {
+            tbody.innerHTML = `<tr><td colspan="5">${html(data.error)}</td></tr>`;
+          } else {
+            for (const t of (data.tickets || [])) {
+              const row = document.createElement("tr");
+              if (data.partial) row.classList.add("health-row-partial");
+              row.innerHTML = [
+                `<td>#${html(t.number)}</td>`,
+                `<td>${html(t.severity)}</td>`,
+                `<td>${html(t.kind)}</td>`,
+                `<td>${html(t.evidence)}</td>`,
+                `<td>${html(t.fix)}</td>`,
+              ].join("");
+              tbody.appendChild(row);
+            }
+          }
+          table.hidden = false;
+        } finally {
+          btn.disabled = false;
+        }
+      });
+    }
+    installHealthPanel();
+"""
+    html_out = html.replace(style_anchor, style + style_anchor, 1)
+    html_out = html_out.replace(main_open_anchor, main_open_anchor + panel, 1)
+    html_out = html_out.replace(script_anchor, script_anchor + script, 1)
+    return html_out
+
+
 def read_open_engine_doctor_health(
     oe_home: Path,
     repo: str,
@@ -5609,6 +5683,7 @@ def read_ringside_html() -> str:
         html = RINGSIDE_HTML_PATH.read_text(encoding="utf-8")
         html = inject_models_tab_into_ringside_html(html)
         html = inject_lanes_panel_into_ringside_html(html)
+        html = inject_health_panel_into_ringside_html(html)
         return html
     except OSError:
         return """<!doctype html>
