@@ -2444,7 +2444,17 @@ class StateWriter:
         outcome = artifact_outcome_from_state(state)
         now = time.monotonic()
         if self._last_library_state == outcome and now - self._last_library_write_monotonic < 5:
-            return
+            # The in-process cache only proves WE haven't changed our mind -
+            # it says nothing about the file itself, which
+            # reconcile_artifact_library_dead_runs() can rewrite out from
+            # under a still-live run (e.g. a false-positive "died" flip if it
+            # races a read of active-runs.json). Re-check the actual on-disk
+            # entry before skipping, so an external overwrite is corrected on
+            # this flush instead of sitting wrong for up to the full 5s.
+            library = read_artifact_library(self.state_dir)
+            entry = library.get("artifacts", {}).get(self.run_name)
+            if isinstance(entry, dict) and entry.get("state") == outcome:
+                return
         try:
             update_artifact_library_live(
                 self.state_dir,

@@ -1380,9 +1380,15 @@
     }
 
     function normalizeArtifactState(value) {
+      // artifact_outcome_from_state() on the Python side only ever emits
+      // live/died/fail/pass into library.json - "finished" is a different
+      // field's vocabulary (a per-run state.json's own "state", see the
+      // rawState handling above) and folding it into "pass" here would
+      // silently show green for a run this function never actually saw the
+      // outcome of, if that value ever crossed into this path by mistake.
       const text = String(value || "").toLowerCase();
       if (text === "live") return "live";
-      if (text === "pass" || text === "finished") return "pass";
+      if (text === "pass") return "pass";
       if (text === "fail") return "fail";
       if (text === "died") return "died";
       return "unknown";

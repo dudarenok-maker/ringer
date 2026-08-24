@@ -1042,6 +1042,125 @@ class ReadOpenEngineDoctorHealthTests(unittest.TestCase):
         self.assertEqual(captured_kwargs.get("errors"), "replace")
 
 
+class ArtifactLibraryLiveRaceTests(unittest.TestCase):
+    """_write_library_live_safe() throttles redundant disk writes by
+    trusting its own in-process cache of the last outcome it wrote. That
+    cache knows nothing about reconcile_artifact_library_dead_runs(), which
+    can rewrite the same file out from under a still-live run (e.g. a
+    false-positive "died" flip racing a read of active-runs.json) - the fix
+    re-checks the actual on-disk entry before honouring the cache's skip."""
+
+    def _make_writer(self, tmp_path: Path) -> "ringer.StateWriter":
+        return ringer.StateWriter(
+            run_id="run-1",
+            run_name="demo",
+            identity="tester",
+            state_dir=tmp_path,
+            engines={},
+            started_at=ringer.datetime.now(ringer.timezone.utc),
+            runtimes=[],
+            lock=threading.RLock(),
+            artifact=ringer.ArtifactConfig(
+                enabled=True,
+                out_template=str(tmp_path / "artifacts" / "{run_id}.html"),
+                report_template=str(tmp_path / "artifacts" / "{run_id}-report.html"),
+                index_out=tmp_path / "artifacts" / "index.html",
+            ),
+            path=tmp_path / "runs" / "run-1.json",
+        )
+
+    def test_an_external_died_flip_is_corrected_on_the_next_flush_not_after_5s(self):
+        with tempfile.TemporaryDirectory(prefix="ringer-lib-race-") as tmp:
+            tmp_path = Path(tmp)
+            writer = self._make_writer(tmp_path)
+            live_state = {"finished": False, "state": "live", "totals": {"pass": 0, "fail": 0}}
+            writer._write_library_live_safe(live_state)
+            self.assertEqual(
+                ringer.read_artifact_library(tmp_path)["artifacts"]["demo"]["state"], "live"
+            )
+
+            # Simulate reconcile_artifact_library_dead_runs() flipping the
+            # file for a run that is, in fact, still alive.
+            library = ringer.read_artifact_library(tmp_path)
+            library["artifacts"]["demo"]["state"] = "died"
+            ringer.write_artifact_library(tmp_path, library)
+
+            # Same outcome as before, well inside the 5s throttle window -
+            # the old code trusted its own cache and skipped writing here,
+            # leaving "died" on disk until the throttle window lapsed.
+            writer._write_library_live_safe(live_state)
+
+            corrected = ringer.read_artifact_library(tmp_path)
+            self.assertEqual(corrected["artifacts"]["demo"]["state"], "live")
+
+    def test_still_throttles_when_the_file_already_agrees(self):
+        # The re-check must not turn this back into an unconditional write -
+        # it should still skip (and avoid the extra disk read's write) when
+        # nothing actually changed underneath it.
+        with tempfile.TemporaryDirectory(prefix="ringer-lib-race-") as tmp:
+            tmp_path = Path(tmp)
+            writer = self._make_writer(tmp_path)
+            live_state = {"finished": False, "state": "live", "totals": {"pass": 0, "fail": 0}}
+            writer._write_library_live_safe(live_state)
+            before = ringer.artifact_library_path(tmp_path).stat().st_mtime_ns
+
+            writer._write_library_live_safe(live_state)
+
+            after = ringer.artifact_library_path(tmp_path).stat().st_mtime_ns
+            self.assertEqual(before, after)
+
+
+class NormalizeArtifactStateTests(unittest.TestCase):
+    """normalizeArtifactState() lives in the static dashboard/ringside.html
+    (not one of the Python-side injectors), so this exercises it directly
+    under Node - a real per-run state.json's own "state" field legitimately
+    uses the literal string "finished" (see the rawState handling elsewhere
+    in this file), and library.json's outcome vocabulary is a DIFFERENT,
+    disjoint set (live/died/fail/pass) produced by artifact_outcome_from_state()
+    on the Python side. Folding "finished" into "pass" here used to mean any
+    value from the wrong vocabulary that ever crossed into this path would
+    render as a silent, confident pass."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        node = shutil.which("node")
+        if node is None:
+            raise unittest.SkipTest("node not on PATH")
+        cls.node = node
+        real_html = ringer.RINGSIDE_HTML_PATH.read_text(encoding="utf-8")
+        match = re.search(
+            r"(function normalizeArtifactState\(value\) \{.*?\n    \})",
+            real_html,
+            re.S,
+        )
+        assert match is not None, "could not extract normalizeArtifactState() from ringside.html"
+        cls.js_function = match.group(1)
+
+    def normalize(self, value: str) -> str:
+        script = f"""
+        {self.js_function}
+        console.log(JSON.stringify(normalizeArtifactState({value!r})));
+        """
+        result = subprocess.run(
+            [self.node, "--input-type=module", "-e", script],
+            capture_output=True, text=True, timeout=15,
+        )
+        self.assertEqual(result.returncode, 0, f"stdout={result.stdout!r} stderr={result.stderr!r}")
+        return json.loads(result.stdout.strip().splitlines()[-1])
+
+    def test_the_only_known_library_outcomes_pass_through_unchanged(self):
+        for value in ("live", "pass", "fail", "died"):
+            self.assertEqual(self.normalize(value), value)
+
+    def test_finished_is_not_silently_folded_into_pass(self):
+        # "finished" belongs to a per-run state.json's own vocabulary, never
+        # to library.json's outcome field - it must not read as a clean pass.
+        self.assertEqual(self.normalize("finished"), "unknown")
+
+    def test_an_unrecognized_value_degrades_to_unknown_not_a_crash_or_a_guess(self):
+        self.assertEqual(self.normalize("cancelled"), "unknown")
+
+
 class InjectHealthPanelTests(unittest.TestCase):
     def _base_html(self) -> str:
         return (
