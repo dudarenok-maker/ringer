@@ -1046,14 +1046,25 @@ class InjectHealthPanelTests(unittest.TestCase):
     def _base_html(self) -> str:
         return (
             "<style>\n    main {\n    }\n</style>\n"
-            "<body>\n    <main>\n    </main>\n"
+            '<body>\n      <time id="clock" class="clock mono"></time>\n'
+            "    <main>\n    </main>\n"
             "<script>\n    tickClock();\n</script>\n</body>"
         )
 
-    def test_injects_the_button_and_table_container(self):
+    def test_injects_the_button_and_dialog(self):
         result = ringer.inject_health_panel_into_ringside_html(self._base_html())
-        self.assertIn('id="health-panel"', result)
+        self.assertIn('id="health-check-btn"', result)
         self.assertIn("Check Health", result)
+        self.assertIn('id="health-dialog"', result)
+        self.assertIn("<dialog", result)
+
+    def test_button_lands_in_the_topbar_before_the_clock_not_inside_main(self):
+        # The original panel lived inside <main>, in the runs/models flow,
+        # and pushed that content down every time it was checked. The button
+        # belongs beside the other always-visible topbar controls; the
+        # dialog itself is inert (not part of layout) until opened.
+        result = ringer.inject_health_panel_into_ringside_html(self._base_html())
+        self.assertLess(result.index('id="health-check-btn"'), result.index('id="clock"'))
 
     def test_idempotent_on_already_injected_html(self):
         once = ringer.inject_health_panel_into_ringside_html(self._base_html())
@@ -1061,25 +1072,31 @@ class InjectHealthPanelTests(unittest.TestCase):
         self.assertEqual(once, twice)
 
     def test_missing_style_anchor_is_a_full_no_op_not_a_partial_injection(self):
-        # Checking only the <main>/script anchors and firing three
-        # independent .replace() calls would let a renamed CSS selector ship
-        # an unstyled panel with the guard reporting nothing wrong.
+        # Checking only the clock/main/script anchors and firing independent
+        # .replace() calls would let a renamed CSS selector ship an unstyled
+        # button/dialog with the guard reporting nothing wrong.
         broken = self._base_html().replace("    main {\n", "    main{\n")
         result = ringer.inject_health_panel_into_ringside_html(broken)
         self.assertEqual(result, broken)
-        self.assertNotIn('id="health-panel"', result)
+        self.assertNotIn('id="health-dialog"', result)
+
+    def test_missing_clock_anchor_is_a_full_no_op_not_a_partial_injection(self):
+        broken = self._base_html().replace('id="clock"', 'id="clock2"')
+        result = ringer.inject_health_panel_into_ringside_html(broken)
+        self.assertEqual(result, broken)
+        self.assertNotIn('id="health-dialog"', result)
 
     def test_missing_main_anchor_is_a_full_no_op_not_a_partial_injection(self):
         broken = self._base_html().replace("    <main>\n", "    <main >\n")
         result = ringer.inject_health_panel_into_ringside_html(broken)
         self.assertEqual(result, broken)
-        self.assertNotIn('id="health-panel"', result)
+        self.assertNotIn('id="health-dialog"', result)
 
     def test_missing_script_anchor_is_a_full_no_op_not_a_partial_injection(self):
         broken = self._base_html().replace("tickClock();", "")
         result = ringer.inject_health_panel_into_ringside_html(broken)
         self.assertEqual(result, broken)
-        self.assertNotIn('id="health-panel"', result)
+        self.assertNotIn('id="health-dialog"', result)
 
     def test_renders_a_visual_distinction_for_partial_rows(self):
         result = ringer.inject_health_panel_into_ringside_html(self._base_html())
@@ -1094,7 +1111,10 @@ class InjectHealthPanelTests(unittest.TestCase):
         result = ringer.inject_health_panel_into_ringside_html(self._base_html())
         for field in ("t.number", "t.severity", "t.kind", "t.evidence", "t.fix"):
             self.assertIn(f"${{html({field})}}", result)
-        self.assertIn("${html(data.error)}", result)
+        # The error/empty/loading text all funnel through showRow(), which
+        # itself escapes via html(message) - not a per-callsite literal.
+        self.assertIn("${html(message)}", result)
+        self.assertIn("showRow(data.error)", result)
 
     def test_a_failed_recheck_never_leaves_a_stale_verdict_on_screen(self):
         # Every branch of the click handler must write to tbody before
@@ -1105,7 +1125,7 @@ class InjectHealthPanelTests(unittest.TestCase):
         handler_start = result.index("btn.addEventListener")
         handler = result[handler_start:result.index("installHealthPanel();", handler_start)]
         self.assertIn("} catch (err) {", handler)
-        self.assertIn("tbody.innerHTML", handler[handler.index("catch (err)"):])
+        self.assertIn("showRow(", handler[handler.index("catch (err)"):])
 
     def test_unrecognized_response_shape_does_not_render_as_a_clean_bill_of_health(self):
         # A response that is neither {error: ...} nor {tickets: [...]} must
@@ -1115,15 +1135,28 @@ class InjectHealthPanelTests(unittest.TestCase):
         self.assertIn("Array.isArray(data.tickets)", result)
         self.assertIn("unrecognized response", result)
 
+    def test_click_opens_the_dialog_as_a_modal(self):
+        result = ringer.inject_health_panel_into_ringside_html(self._base_html())
+        handler_start = result.index("btn.addEventListener")
+        handler = result[handler_start:result.index("installHealthPanel();", handler_start)]
+        self.assertIn("openDialog()", handler)
+        self.assertIn("dialog.showModal", result)
+
+    def test_close_button_and_backdrop_click_both_close_the_dialog(self):
+        result = ringer.inject_health_panel_into_ringside_html(self._base_html())
+        self.assertIn("closeBtn.addEventListener(\"click\", () => dialog.close())", result)
+        self.assertIn("if (event.target === dialog) dialog.close();", result)
+
     def test_injects_cleanly_into_the_real_ringside_html(self):
-        # Every test above runs against a synthetic fixture. The three
-        # anchors this injector depends on are real strings in a real,
+        # Every test above runs against a synthetic fixture. The anchors
+        # this injector depends on are real strings in a real,
         # independently-maintained file (dashboard/ringside.html) that other
         # work can rename without ever touching this file - this is the one
         # test that would actually catch that.
         real_html = ringer.RINGSIDE_HTML_PATH.read_text(encoding="utf-8")
         injected = ringer.inject_health_panel_into_ringside_html(real_html)
-        self.assertIn('id="health-panel"', injected)
+        self.assertIn('id="health-dialog"', injected)
+        self.assertIn('id="health-check-btn"', injected)
         self.assertIn("installHealthPanel();", injected)
 
 

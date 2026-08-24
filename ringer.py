@@ -5575,33 +5575,118 @@ def inject_models_tab_into_ringside_html(html: str) -> str:
 
 
 def inject_health_panel_into_ringside_html(html: str) -> str:
+    # The button lives in the topbar (a global, always-visible action, same
+    # tier as the clock), and results render into a native <dialog> rather
+    # than an always-in-flow section - the original inline section sat at
+    # the top of <main> with no design-system framing (no card, no border,
+    # default browser table styling) and pushed the runs/models panels down
+    # every time it was checked, which read as a stray debug widget rather
+    # than a deliberate control.
     style_anchor = "    main {\n"
+    clock_anchor = '      <time id="clock" class="clock mono"></time>\n'
     main_open_anchor = "    <main>\n"
     script_anchor = "    tickClock();\n"
     if (
-        'id="health-panel"' in html
+        'id="health-dialog"' in html
         or style_anchor not in html
+        or clock_anchor not in html
         or main_open_anchor not in html
         or script_anchor not in html
     ):
         return html
     style = """
+    .health-check-btn {
+      flex: 0 0 auto;
+      padding: 6px 12px;
+      border: 1px solid var(--hairline);
+      border-radius: 7px;
+      background: var(--surface);
+      color: var(--ink);
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .health-check-btn:hover { border-color: var(--accent); }
+    .health-check-btn:disabled { opacity: .6; cursor: default; }
+    dialog#health-dialog {
+      width: min(720px, 92vw);
+      max-height: 80vh;
+      padding: 0;
+      border: 1px solid var(--hairline);
+      border-radius: 10px;
+      background: var(--surface);
+      color: var(--ink);
+    }
+    dialog#health-dialog::backdrop { background: rgba(0, 0, 0, .55); }
+    .health-dialog-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--hairline);
+    }
+    .health-dialog-head h2 {
+      margin: 0;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .health-dialog-close {
+      appearance: none;
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      font-size: 18px;
+      line-height: 1;
+      padding: 4px 8px;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .health-dialog-close:hover { color: var(--ink); background: var(--ground); }
+    #health-dialog-body { padding: 6px 16px 16px; overflow: auto; max-height: calc(80vh - 53px); }
+    .health-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .health-table th,
+    .health-table td {
+      padding: 9px 8px;
+      border-bottom: 1px solid var(--hairline);
+      text-align: left;
+      vertical-align: top;
+    }
+    .health-table th {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
     .health-row-partial { opacity: .6; }
+    .health-empty { color: var(--muted); font-size: 13px; padding: 16px 0; }
 """
-    panel = """      <section id="health-panel" class="mono">
-        <button id="health-check-btn" type="button">Check Health</button>
-        <table id="health-table" hidden>
-          <thead><tr><th>#</th><th>Severity</th><th>Kind</th><th>Evidence</th><th>Fix</th></tr></thead>
-          <tbody></tbody>
-        </table>
-      </section>
+    button = """      <button id="health-check-btn" type="button" class="health-check-btn mono">Check Health</button>
+"""
+    dialog = """      <dialog id="health-dialog" class="mono" aria-label="Open Engine health">
+        <div class="health-dialog-head">
+          <h2>Open Engine health</h2>
+          <button id="health-dialog-close" type="button" class="health-dialog-close" aria-label="Close">&times;</button>
+        </div>
+        <div id="health-dialog-body">
+          <table id="health-table" class="health-table" hidden>
+            <thead><tr><th>#</th><th>Severity</th><th>Kind</th><th>Evidence</th><th>Fix</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </dialog>
 """
     script = r"""
     function installHealthPanel() {
       const btn = document.getElementById("health-check-btn");
+      const dialog = document.getElementById("health-dialog");
+      const closeBtn = document.getElementById("health-dialog-close");
       const table = document.getElementById("health-table");
       const tbody = table ? table.querySelector("tbody") : null;
-      if (!btn || !table || !tbody) return;
+      if (!btn || !dialog || !closeBtn || !table || !tbody) return;
 
       function html(value) {
         return String(value ?? "")
@@ -5612,8 +5697,28 @@ def inject_health_panel_into_ringside_html(html: str) -> str:
           .replace(/'/g, "&#39;");
       }
 
+      function showRow(message) {
+        table.hidden = false;
+        tbody.innerHTML = `<tr><td colspan="5" class="health-empty">${html(message)}</td></tr>`;
+      }
+
+      function openDialog() {
+        if (typeof dialog.showModal === "function") dialog.showModal();
+        else dialog.setAttribute("open", "");
+      }
+
+      closeBtn.addEventListener("click", () => dialog.close());
+      // Click on the backdrop (the dialog element itself, outside its
+      // padding box) closes it - the visible card sits inside, so a click
+      // that lands on `dialog` and not a descendant is always the backdrop.
+      dialog.addEventListener("click", event => {
+        if (event.target === dialog) dialog.close();
+      });
+
       btn.addEventListener("click", async () => {
         btn.disabled = true;
+        showRow("checking...");
+        openDialog();
         try {
           const res = await fetch("/api/oe-health");
           const data = await res.json();
@@ -5621,28 +5726,31 @@ def inject_health_panel_into_ringside_html(html: str) -> str:
           // a failed re-check must never leave the PREVIOUS verdict on
           // screen with no indication the refresh didn't happen.
           if (data && typeof data === "object" && data.error) {
-            tbody.innerHTML = `<tr><td colspan="5">${html(data.error)}</td></tr>`;
+            showRow(data.error);
           } else if (data && Array.isArray(data.tickets)) {
-            tbody.innerHTML = "";
-            for (const t of data.tickets) {
-              const row = document.createElement("tr");
-              if (data.partial) row.classList.add("health-row-partial");
-              row.innerHTML = [
-                `<td>#${html(t.number)}</td>`,
-                `<td>${html(t.severity)}</td>`,
-                `<td>${html(t.kind)}</td>`,
-                `<td>${html(t.evidence)}</td>`,
-                `<td>${html(t.fix)}</td>`,
-              ].join("");
-              tbody.appendChild(row);
+            if (!data.tickets.length) {
+              showRow("no open findings");
+            } else {
+              tbody.innerHTML = "";
+              for (const t of data.tickets) {
+                const row = document.createElement("tr");
+                if (data.partial) row.classList.add("health-row-partial");
+                row.innerHTML = [
+                  `<td>#${html(t.number)}</td>`,
+                  `<td>${html(t.severity)}</td>`,
+                  `<td>${html(t.kind)}</td>`,
+                  `<td>${html(t.evidence)}</td>`,
+                  `<td>${html(t.fix)}</td>`,
+                ].join("");
+                tbody.appendChild(row);
+              }
+              table.hidden = false;
             }
           } else {
-            tbody.innerHTML = `<tr><td colspan="5">${html("unrecognized response from /api/oe-health")}</td></tr>`;
+            showRow("unrecognized response from /api/oe-health");
           }
-          table.hidden = false;
         } catch (err) {
-          tbody.innerHTML = `<tr><td colspan="5">${html(String(err && err.message || err))}</td></tr>`;
-          table.hidden = false;
+          showRow(String(err && err.message || err));
         } finally {
           btn.disabled = false;
         }
@@ -5651,7 +5759,8 @@ def inject_health_panel_into_ringside_html(html: str) -> str:
     installHealthPanel();
 """
     html_out = html.replace(style_anchor, style + style_anchor, 1)
-    html_out = html_out.replace(main_open_anchor, main_open_anchor + panel, 1)
+    html_out = html_out.replace(clock_anchor, button + clock_anchor, 1)
+    html_out = html_out.replace(main_open_anchor, main_open_anchor + dialog, 1)
     html_out = html_out.replace(script_anchor, script_anchor + script, 1)
     return html_out
 
