@@ -5827,8 +5827,13 @@ def inject_health_panel_into_ringside_html(html: str) -> str:
         const flagged = engines.filter(e => e && e.flagged);
         engBody.innerHTML = "";
         // Flagged engines first - that is the part worth seeing without
-        // scrolling past every healthy/parked row.
-        const ordered = flagged.concat(engines.filter(e => !e || !e.flagged));
+        // scrolling past every healthy/parked row. `e && !e.flagged`, NOT
+        // `!e || !e.flagged` - the latter let a falsy (null/undefined) array
+        // element survive into `ordered` (since `!e` is true for it), and
+        // the loop below reads e.flagged/e.rate/e.engine unconditionally -
+        // review reproduced this as a raw TypeError replacing a correct
+        // verdict on screen.
+        const ordered = flagged.concat(engines.filter(e => e && !e.flagged));
         for (const e of ordered) {
           const row = document.createElement("tr");
           // FLAGGED, not health-row-partial - that class means "incomplete
@@ -5883,6 +5888,14 @@ def inject_health_panel_into_ringside_html(html: str) -> str:
             // health-row-partial styling exists to avoid one level up.
             badge.textContent = partial ? `${count}+` : String(count);
             badge.classList.add("is-visible");
+          } else if (partial) {
+            // ZERO FOUND ON AN INCOMPLETE SCAN IS NOT THE SAME CLAIM AS ZERO
+            // FOUND ON A COMPLETE ONE - review caught that `partial` only
+            // reached the badge inside the count > 0 branch, so a scan that
+            // errored out having found nothing YET still rendered as a
+            // hidden, all-clear badge. Reuse the unknown state rather than
+            // inventing a fourth one: both mean "cannot vouch for zero".
+            setBadgeUnknown();
           } else {
             badge.classList.remove("is-visible");
           }
@@ -5899,26 +5912,52 @@ def inject_health_panel_into_ringside_html(html: str) -> str:
       });
 
       // THE SERVER ANSWERS AT MOST ONE CHECK AT A TIME (see /api/oe-health's
-      // own lock) - "a health check is already in progress" is a transient
-      // collision with the background poll below, not a real failure, and
-      // review caught that showing it as a terminal error strands an
-      // operator who clicked at the wrong instant with no way to see the
-      // check they actually wanted. One retry, after a short wait, covers
-      // it; a genuine second collision falls through to the normal error
-      // path rather than retrying forever.
+      // own lock, which the server holds for up to a 60s budget around the
+      // doctor subprocess it spawns) - "a health check is already in
+      // progress" is a transient collision with the background poll below,
+      // not a real failure, and review caught that showing it as a terminal
+      // error strands an operator who clicked at the wrong instant with no
+      // way to see the check they actually wanted.
+      //
+      // POLLED FOR UP TO ~65s, NOT A SINGLE SHORT RETRY. A prior version
+      // waited 1.5s once - review executed the actual repro and found the
+      // lock routinely outlives that by 40x, so the "retry" just added 1.5s
+      // of latency in front of the identical unhelpful error. The cap here
+      // is deliberately a little past the server's own 60s budget: long
+      // enough to outlast a genuine in-flight check, short enough that a
+      // second, independently-stuck collision still surfaces as an error
+      // rather than hanging the dialog forever.
       const LOCK_CONTENTION_MESSAGE = "a health check is already in progress";
+      const LOCK_CONTENTION_MAX_WAIT_MS = 65000;
+      const LOCK_CONTENTION_POLL_MS = 3000;
       function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
       btn.addEventListener("click", async () => {
         btn.disabled = true;
         showRow("checking...");
         openDialog();
+        // GESTURE-TRIGGERED, ON THE FIRST CLICK ONLY - a click is a real
+        // user gesture, which Firefox requires before it will even ask; an
+        // unconditional call at page load (the prior version) either does
+        // nothing there or reads as an unprompted request, which is part of
+        // what trains Chrome to auto-block the origin's notifications
+        // entirely. Still guarded on Notification.permission === "default"
+        // so this fires at most once regardless of how many times the
+        // button is clicked.
+        try {
+          if (typeof Notification !== "undefined" && Notification.permission === "default") {
+            Notification.requestPermission().catch(() => {});
+          }
+        } catch (err) { /* Notification support is a courtesy, never fatal */ }
         try {
           let res = await fetch("/api/oe-health");
           let data = await res.json();
-          if (data && typeof data === "object" && data.error === LOCK_CONTENTION_MESSAGE) {
-            showRow("a check is already running - retrying...");
-            await sleep(1500);
+          let waitedMs = 0;
+          while (data && typeof data === "object" && data.error === LOCK_CONTENTION_MESSAGE
+                 && waitedMs < LOCK_CONTENTION_MAX_WAIT_MS) {
+            showRow(`a check is already running - waiting... (${Math.round(waitedMs / 1000)}s)`);
+            await sleep(LOCK_CONTENTION_POLL_MS);
+            waitedMs += LOCK_CONTENTION_POLL_MS;
             res = await fetch("/api/oe-health");
             data = await res.json();
           }
@@ -5990,10 +6029,17 @@ def inject_health_panel_into_ringside_html(html: str) -> str:
         // this; this is a courtesy for whoever has the tab open, and firing
         // it every 5 minutes for an already-known problem would just teach
         // the operator to ignore it.
+        //
+        // IDENTITY IS TICKETS + ENGINES ONLY - `partial` is NOT part of the
+        // signature. It flaps independently of the underlying finding (a
+        // transient `gh` API error on one poll, gone on the next) while the
+        // actual stuck tickets stay constant - review executed exactly that
+        // sequence and got 3 toasts for one finding when `partial` was
+        // folded into the identity. `partial` still reaches the human via
+        // the notification body text below, just not the de-dup key.
         const signature = JSON.stringify({
           t: data.tickets.map(t => t.number).sort(),
           e: flagged.map(e => e.engine).sort(),
-          p: !!data.partial,
         });
         const count = data.tickets.length + flagged.length;
         if (notifySignature !== null && signature !== notifySignature && count > 0
@@ -6008,18 +6054,21 @@ def inject_health_panel_into_ringside_html(html: str) -> str:
         notifySignature = signature;
       }
 
-      // GUARDED: on pre-16 Safari, Notification.requestPermission() throws
-      // SYNCHRONOUSLY when called without a legacy callback argument, rather
-      // than rejecting - review caught that an uncaught throw here killed
-      // the rest of installHealthPanel() before backgroundPoll()/
-      // setInterval() below ever ran, silently disabling the whole panel on
-      // that engine, badge included.
-      try {
-        if (typeof Notification !== "undefined" && Notification.permission === "default") {
-          Notification.requestPermission().catch(() => {});
-        }
-      } catch (err) { /* Notification support is a courtesy, never fatal */ }
+      // Notification permission is requested from the click handler above
+      // (a real user gesture), not here - see its own comment for why an
+      // unconditional request at install time is wrong on more than one
+      // browser, not just the pre-16-Safari throw the try/catch there still
+      // guards against defensively.
 
+      // THE BADGE STARTS "UNKNOWN", NOT HIDDEN. backgroundPoll() below is
+      // async and the server can hold its single-check lock for up to a 60s
+      // budget (see the click handler's own comment on that same lock) -
+      // review found that every page load had a multi-second-to-60s window
+      // where the badge affirmed "all clear" having checked nothing yet.
+      // setBadgeUnknown() here makes that window honestly say "checking",
+      // and backgroundPoll() overwrites it the moment the first check
+      // actually resolves, success or failure either way.
+      setBadgeUnknown();
       backgroundPoll();
       setInterval(backgroundPoll, 5 * 60 * 1000);
     }
