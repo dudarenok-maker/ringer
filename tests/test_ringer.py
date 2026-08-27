@@ -1489,7 +1489,7 @@ class HealthPanelBehaviorTests(unittest.TestCase):
             this.textContent = ""; this.innerHTML = ""; this.disabled = false;
             this._listeners = {{}};
           }}
-          querySelector() {{ return new FakeEl(this.id + "-tbody"); }}
+          querySelector() {{ return byId(this.id + "-tbody"); }}
           addEventListener(type, fn) {{ this._listeners[type] = fn; }}
           appendChild() {{}}
           setAttribute() {{}}
@@ -1541,14 +1541,31 @@ class HealthPanelBehaviorTests(unittest.TestCase):
         self.assertEqual(out["afterResolve"], {"text": "?", "unknown": False, "visible": False})
 
     def test_falsy_engines_element_does_not_crash_the_click_handler(self):
+        # NOT an uncaught-throw check - the click handler's OWN try/catch
+        # swallows any exception from renderEngines() and converts it into
+        # showRow(err.message), so a version of this test that only checked
+        # for an escaped exception would pass against BROKEN code too (it
+        # did, until this was caught): the crash still happens, it just
+        # never leaves the handler. What distinguishes crash from no-crash
+        # is the RENDERED RESULT - a crash overwrites "no open findings"
+        # with the TypeError's own message.
         out = self.run_harness("""
-          fetchQueue = [{ tickets: [], engines: [null, { engine: "x", flagged: false, rate: 90, ok: 9, recent: 10, span_hrs: 1, credit_dead: 0, advice: "" }], errors: [], partial: false }];
+          // installHealthPanel() fires its own load-time backgroundPoll()
+          // immediately (fire-and-forget) - queue a throwaway response for
+          // THAT first, and let it resolve, before queuing the one the
+          // click handler is meant to consume; otherwise the two race for
+          // the same queue entry.
+          fetchQueue = [{ tickets: [], engines: [], errors: [], partial: false }];
           installHealthPanel();
-          let threw = null;
-          try { await els["health-check-btn"]._listeners.click(); } catch (e) { threw = e.message; }
-          console.log(JSON.stringify({ threw }));
+          await new Promise(r => setImmediate(r));
+
+          fetchQueue = [{ tickets: [], engines: [null, { engine: "x", flagged: false, rate: 90, ok: 9, recent: 10, span_hrs: 1, credit_dead: 0, advice: "" }], errors: [], partial: false }];
+          await els["health-check-btn"]._listeners.click();
+          const tbody = els["health-table-tbody"];
+          console.log(JSON.stringify({ tbodyHtml: tbody ? tbody.innerHTML : null }));
         """)
-        self.assertIsNone(out["threw"])
+        self.assertIn("no open findings", out["tbodyHtml"] or "")
+        self.assertNotIn("Cannot read prop", out["tbodyHtml"] or "")
 
     def test_partial_true_with_zero_findings_reads_as_unknown_not_clean(self):
         out = self.run_harness("""
