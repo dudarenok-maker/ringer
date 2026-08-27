@@ -1110,6 +1110,85 @@ class ArtifactLibraryLiveRaceTests(unittest.TestCase):
             self.assertEqual(before, after)
 
 
+class ActiveRunsRegistrationRaceTests(unittest.TestCase):
+    """register_active_run()/unregister_active_run() used to read-mutate-write
+    active-runs.json with no lock at all - up to 4 concurrent lanes
+    (oe-tick.ps1's own cap), each its own ringer.py process, made a lost
+    update reachable: whichever process's write landed last silently dropped
+    or resurrected the OTHER process's entry.
+    reconcile_artifact_library_dead_runs() trusts this file's membership, so
+    a dropped entry for a genuinely running process flipped its Ringside
+    dropdown to "died" mid-run. Reproduced against a live box 2026-08-27."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="ringer-active-runs-race-")
+        self.addCleanup(self._tmp.cleanup)
+        self._home_patch = unittest.mock.patch.object(
+            ringer, "ringer_home", return_value=Path(self._tmp.name)
+        )
+        self._home_patch.start()
+        self.addCleanup(self._home_patch.stop)
+
+    def test_lock_serialises_two_concurrent_holders(self):
+        # Direct proof of mutual exclusion: while thread A holds the lock,
+        # thread B must not be able to enter its own critical section too -
+        # if it can, the two "critical sections" below would overlap in time.
+        order: list[str] = []
+        entered = threading.Event()
+        release = threading.Event()
+
+        def hold_first():
+            with ringer._active_runs_lock():
+                order.append("A-enter")
+                entered.set()
+                release.wait(timeout=2)
+                order.append("A-exit")
+
+        t = threading.Thread(target=hold_first)
+        t.start()
+        self.assertTrue(entered.wait(timeout=2), "thread A never entered the lock")
+
+        # Thread A is inside the lock right now; a second acquisition attempt
+        # must block until it releases, not interleave.
+        with ringer._active_runs_lock(timeout=3):
+            order.append("B-enter")
+        release.set()
+        t.join(timeout=3)
+
+        self.assertEqual(order, ["A-enter", "A-exit", "B-enter"])
+
+    def test_interleaved_register_and_unregister_never_loses_an_entry(self):
+        # The exact shape of the real bug: process A registers, then while
+        # A's write is still "in flight" (simulated via a monkeypatched
+        # delay between A's read and its write), process B registers too.
+        # Without the lock, B's write - based on a read that predates A's
+        # write - clobbers A's entry right back out of the file.
+        real_write = ringer._write_active_runs
+        a_write_started = threading.Event()
+        b_may_write = threading.Event()
+
+        def delayed_write(runs):
+            if "run-a" in runs and "run-b" not in runs:
+                a_write_started.set()
+                b_may_write.wait(timeout=2)
+            real_write(runs)
+
+        with unittest.mock.patch.object(ringer, "_write_active_runs", side_effect=delayed_write):
+            def register_a():
+                ringer.register_active_run("run-a", "id-a", "name-a", Path("."), pid=os.getpid())
+
+            t = threading.Thread(target=register_a)
+            t.start()
+            self.assertTrue(a_write_started.wait(timeout=2), "A never reached its write")
+            ringer.register_active_run("run-b", "id-b", "name-b", Path("."), pid=os.getpid())
+            b_may_write.set()
+            t.join(timeout=3)
+
+        final = ringer.read_active_runs()
+        self.assertIn("run-a", final, "the lock should have made B wait for A's write")
+        self.assertIn("run-b", final)
+
+
 class NormalizeArtifactStateTests(unittest.TestCase):
     """normalizeArtifactState() lives in the static dashboard/ringside.html
     (not one of the Python-side injectors), so this exercises it directly

@@ -3205,13 +3205,68 @@ def _write_active_runs(runs: dict[str, dict[str, Any]]) -> None:
     os.replace(tmp, path)
 
 
+@contextlib.contextmanager
+def _active_runs_lock(timeout: float = 5.0, stale_after: float = 30.0) -> Iterable[None]:
+    """Cross-process mutual exclusion around active-runs.json's
+    read-modify-write cycle.
+
+    register_active_run()/unregister_active_run() each used to read the
+    whole file, mutate one entry, and write the whole file back with no
+    lock at all. oe-tick.ps1 runs up to 4 lanes concurrently, each its own
+    ringer.py process calling these at its own start/stop - two such
+    read-modify-write cycles overlapping is a classic lost update: whichever
+    process's write lands last silently wins, dropping or resurrecting the
+    OTHER process's entry. reconcile_artifact_library_dead_runs() trusts
+    this file's membership to decide whether a "live" artifact's run has
+    died, so a dropped entry for a genuinely running process flipped its
+    Ringside dropdown to "died" while the run kept working underneath it -
+    reproduced against a live box 2026-08-27 (a second lane's
+    register/unregister landing mid-window dropped the first lane's own
+    just-registered entry).
+
+    Uses an exclusive-create sentinel file rather than fcntl/msvcrt, since
+    the box this raced on is Windows and catalog_refresh_lock()'s fcntl
+    approach silently no-ops there (see its own try/except ImportError) -
+    os.O_CREAT | os.O_EXCL is atomic on both platforms. A lock file older
+    than stale_after is treated as abandoned by a process that died holding
+    it, not as real contention; a caller that still cannot acquire it after
+    timeout proceeds unlocked rather than hanging a run indefinitely - a
+    rare unlocked write losing this race is the pre-existing behaviour,
+    never worse than before this lock existed.
+    """
+    lock_path = active_runs_path().with_name(active_runs_path().name + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + timeout
+    fd = None
+    while fd is None:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            with contextlib.suppress(OSError):
+                if time.time() - lock_path.stat().st_mtime > stale_after:
+                    lock_path.unlink()
+                    continue
+            if time.monotonic() > deadline:
+                break
+            time.sleep(0.05)
+    try:
+        yield
+    finally:
+        if fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            with contextlib.suppress(OSError):
+                lock_path.unlink()
+
+
 def read_active_runs() -> dict[str, dict[str, Any]]:
     path = active_runs_path()
-    runs = _read_active_runs_raw(path)
-    pruned = _prune_active_runs(runs)
-    if pruned != runs:
-        _write_active_runs(pruned)
-    return pruned
+    with _active_runs_lock():
+        runs = _read_active_runs_raw(path)
+        pruned = _prune_active_runs(runs)
+        if pruned != runs:
+            _write_active_runs(pruned)
+        return pruned
 
 
 def register_active_run(
@@ -3223,21 +3278,23 @@ def register_active_run(
     pid: int | None = None,
     started_at: datetime | None = None,
 ) -> None:
-    runs = read_active_runs()
-    runs[run_id] = {
-        "pid": int(pid if pid is not None else os.getpid()),
-        "identity": identity,
-        "run_name": run_name,
-        "workdir": str(workdir),
-        "started_at": (started_at or datetime.now(timezone.utc)).isoformat(),
-    }
-    _write_active_runs(runs)
+    with _active_runs_lock():
+        runs = _prune_active_runs(_read_active_runs_raw(active_runs_path()))
+        runs[run_id] = {
+            "pid": int(pid if pid is not None else os.getpid()),
+            "identity": identity,
+            "run_name": run_name,
+            "workdir": str(workdir),
+            "started_at": (started_at or datetime.now(timezone.utc)).isoformat(),
+        }
+        _write_active_runs(runs)
 
 
 def unregister_active_run(run_id: str) -> None:
-    runs = read_active_runs()
-    runs.pop(run_id, None)
-    _write_active_runs(runs)
+    with _active_runs_lock():
+        runs = _prune_active_runs(_read_active_runs_raw(active_runs_path()))
+        runs.pop(run_id, None)
+        _write_active_runs(runs)
 
 
 def artifacts_dir(state_dir: Path) -> Path:
