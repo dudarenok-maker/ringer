@@ -5730,8 +5730,28 @@ def inject_health_panel_into_ringside_html(html: str) -> str:
     }
     .health-row-partial { opacity: .6; }
     .health-empty { color: var(--muted); font-size: 13px; padding: 16px 0; }
+    .health-check-btn { position: relative; }
+    .health-badge {
+      display: none;
+      margin-left: 6px;
+      padding: 1px 6px;
+      border-radius: 8px;
+      font-size: 11px;
+      font-weight: 700;
+      background: var(--fail, #c0392b);
+      color: #fff;
+    }
+    .health-badge.is-visible { display: inline-block; }
+    .health-subhead {
+      margin: 18px 0 4px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
 """
-    button = """      <button id="health-check-btn" type="button" class="health-check-btn mono">Check Health</button>
+    button = """      <button id="health-check-btn" type="button" class="health-check-btn mono">Check Health<span id="health-badge" class="health-badge mono"></span></button>
 """
     dialog = """      <dialog id="health-dialog" class="mono" aria-label="Open Engine health">
         <div class="health-dialog-head">
@@ -5743,16 +5763,25 @@ def inject_health_panel_into_ringside_html(html: str) -> str:
             <thead><tr><th>#</th><th>Severity</th><th>Kind</th><th>Evidence</th><th>Fix</th></tr></thead>
             <tbody></tbody>
           </table>
+          <div id="health-engines-head" class="health-subhead" hidden>Engines</div>
+          <table id="health-engines-table" class="health-table" hidden>
+            <thead><tr><th>Engine</th><th>Rate</th><th>Window</th><th>Note</th></tr></thead>
+            <tbody></tbody>
+          </table>
         </div>
       </dialog>
 """
     script = r"""
     function installHealthPanel() {
       const btn = document.getElementById("health-check-btn");
+      const badge = document.getElementById("health-badge");
       const dialog = document.getElementById("health-dialog");
       const closeBtn = document.getElementById("health-dialog-close");
       const table = document.getElementById("health-table");
       const tbody = table ? table.querySelector("tbody") : null;
+      const engHead = document.getElementById("health-engines-head");
+      const engTable = document.getElementById("health-engines-table");
+      const engBody = engTable ? engTable.querySelector("tbody") : null;
       if (!btn || !dialog || !closeBtn || !table || !tbody) return;
 
       function html(value) {
@@ -5767,11 +5796,61 @@ def inject_health_panel_into_ringside_html(html: str) -> str:
       function showRow(message) {
         table.hidden = false;
         tbody.innerHTML = `<tr><td colspan="5" class="health-empty">${html(message)}</td></tr>`;
+        // A message row (checking/error/empty) replaces the tickets table's
+        // content, so any engines table left over from a PREVIOUS successful
+        // check must not keep showing stale data underneath it.
+        if (engHead) engHead.hidden = true;
+        if (engTable) engTable.hidden = true;
       }
 
       function openDialog() {
         if (typeof dialog.showModal === "function") dialog.showModal();
         else dialog.setAttribute("open", "");
+      }
+
+      function renderEngines(engines) {
+        if (!engHead || !engTable || !engBody) return;
+        if (!Array.isArray(engines) || !engines.length) {
+          engHead.hidden = true;
+          engTable.hidden = true;
+          return;
+        }
+        const flagged = engines.filter(e => e && e.flagged);
+        engBody.innerHTML = "";
+        // Flagged engines first - that is the part worth seeing without
+        // scrolling past every healthy/parked row.
+        const ordered = flagged.concat(engines.filter(e => !e || !e.flagged));
+        for (const e of ordered) {
+          const row = document.createElement("tr");
+          if (e.flagged) row.classList.add("health-row-partial");
+          const rate = e.rate === null || e.rate === undefined ? "no scored runs" : `${e.rate}% (${e.ok}/${e.recent})`;
+          row.innerHTML = [
+            `<td>${html(e.engine)}</td>`,
+            `<td>${html(rate)}</td>`,
+            `<td>${html(e.span_hrs)}h</td>`,
+            `<td>${html(e.advice)}</td>`,
+          ].join("");
+          engBody.appendChild(row);
+        }
+        engHead.hidden = false;
+        engTable.hidden = false;
+      }
+
+      // BADGE, SHARED BY THE CLICK HANDLER AND THE BACKGROUND POLL BELOW.
+      // Reflects the last successful check regardless of whether the dialog
+      // is open - this is the "visible without an extra click" part.
+      function updateBadge(tickets, engines) {
+        const flagged = Array.isArray(engines) ? engines.filter(e => e && e.flagged) : [];
+        const count = (Array.isArray(tickets) ? tickets.length : 0) + flagged.length;
+        if (badge) {
+          if (count > 0) {
+            badge.textContent = String(count);
+            badge.classList.add("is-visible");
+          } else {
+            badge.classList.remove("is-visible");
+          }
+        }
+        return flagged;
       }
 
       closeBtn.addEventListener("click", () => dialog.close());
@@ -5795,6 +5874,7 @@ def inject_health_panel_into_ringside_html(html: str) -> str:
           if (data && typeof data === "object" && data.error) {
             showRow(data.error);
           } else if (data && Array.isArray(data.tickets)) {
+            updateBadge(data.tickets, data.engines);
             if (!data.tickets.length) {
               showRow("no open findings");
             } else {
@@ -5813,6 +5893,7 @@ def inject_health_panel_into_ringside_html(html: str) -> str:
               }
               table.hidden = false;
             }
+            renderEngines(data.engines);
           } else {
             showRow("unrecognized response from /api/oe-health");
           }
@@ -5822,6 +5903,51 @@ def inject_health_panel_into_ringside_html(html: str) -> str:
           btn.disabled = false;
         }
       });
+
+      // BACKGROUND POLL, SEPARATE FROM THE CLICK HANDLER ABOVE. A silent poll
+      // must never open the dialog or touch its content - only the badge -
+      // so it cannot interrupt whatever the operator is doing or clobber a
+      // verdict currently on screen from a deliberate check.
+      let notifySignature = null;
+      async function backgroundPoll() {
+        let data;
+        try {
+          const res = await fetch("/api/oe-health");
+          data = await res.json();
+        } catch (err) {
+          return;
+        }
+        if (!data || typeof data !== "object" || data.error) return;
+        if (!Array.isArray(data.tickets)) return;
+        const flagged = updateBadge(data.tickets, data.engines);
+
+        // A DESKTOP NOTIFICATION ONLY ON A NEW/CHANGED SIGNATURE, never on
+        // every poll - the box already has its own OS-level watchdog for
+        // this; this is a courtesy for whoever has the tab open, and firing
+        // it every 5 minutes for an already-known problem would just teach
+        // the operator to ignore it.
+        const signature = JSON.stringify({
+          t: data.tickets.map(t => t.number).sort(),
+          e: flagged.map(e => e.engine).sort(),
+        });
+        const count = data.tickets.length + flagged.length;
+        if (notifySignature !== null && signature !== notifySignature && count > 0
+            && typeof Notification !== "undefined" && Notification.permission === "granted") {
+          try {
+            new Notification("Open Engine needs a look", {
+              body: `${data.tickets.length} stuck ticket(s), ${flagged.length} flagged engine(s)`,
+            });
+          } catch (err) { /* notifications are a courtesy, never fatal */ }
+        }
+        notifySignature = signature;
+      }
+
+      if (typeof Notification !== "undefined" && Notification.permission === "default") {
+        Notification.requestPermission().catch(() => {});
+      }
+
+      backgroundPoll();
+      setInterval(backgroundPoll, 5 * 60 * 1000);
     }
     installHealthPanel();
 """
