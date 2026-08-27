@@ -5742,6 +5742,10 @@ def inject_health_panel_into_ringside_html(html: str) -> str:
       color: #fff;
     }
     .health-badge.is-visible { display: inline-block; }
+    /* UNKNOWN is distinct from a red count - a "?" the operator has to
+       investigate is a different signal from "N findings", and both must be
+       distinct from the badge being hidden (a genuinely clean check). */
+    .health-badge.is-unknown { background: var(--muted, #6b7280); }
     .health-subhead {
       margin: 18px 0 4px;
       font-size: 11px;
@@ -5750,6 +5754,11 @@ def inject_health_panel_into_ringside_html(html: str) -> str:
       text-transform: uppercase;
       color: var(--muted);
     }
+    /* A row worth acting on must stand out, not fade - .health-row-partial's
+       opacity: .6 is right for "this data is incomplete" (the tickets table)
+       but backwards for "this engine is failing" (the engines table), which
+       is exactly what review found: the urgent rows rendered faintest. */
+    .health-row-flagged { color: var(--fail, #c0392b); font-weight: 700; }
 """
     button = """      <button id="health-check-btn" type="button" class="health-check-btn mono">Check Health<span id="health-badge" class="health-badge mono"></span></button>
 """
@@ -5822,8 +5831,17 @@ def inject_health_panel_into_ringside_html(html: str) -> str:
         const ordered = flagged.concat(engines.filter(e => !e || !e.flagged));
         for (const e of ordered) {
           const row = document.createElement("tr");
-          if (e.flagged) row.classList.add("health-row-partial");
-          const rate = e.rate === null || e.rate === undefined ? "no scored runs" : `${e.rate}% (${e.ok}/${e.recent})`;
+          // FLAGGED, not health-row-partial - that class means "incomplete
+          // data" elsewhere on this page and fades the row; a flagged engine
+          // is the opposite of incomplete, it is the finding.
+          if (e.flagged) row.classList.add("health-row-flagged");
+          let rate = e.rate === null || e.rate === undefined ? "no scored runs" : `${e.rate}% (${e.ok}/${e.recent})`;
+          // credit_dead is why a low OK/RECENT ratio is honest rather than
+          // misleading (a credit-parked engine's dead launches are excluded
+          // from the ratio already) - dropping it here would silently
+          // reintroduce the exact distortion oe-doctor.ps1's own text report
+          // exists to avoid.
+          if (e.credit_dead) rate += ` [${e.credit_dead} credit-dead excluded]`;
           row.innerHTML = [
             `<td>${html(e.engine)}</td>`,
             `<td>${html(rate)}</td>`,
@@ -5839,12 +5857,31 @@ def inject_health_panel_into_ringside_html(html: str) -> str:
       // BADGE, SHARED BY THE CLICK HANDLER AND THE BACKGROUND POLL BELOW.
       // Reflects the last successful check regardless of whether the dialog
       // is open - this is the "visible without an extra click" part.
-      function updateBadge(tickets, engines) {
+      //
+      // THREE STATES, NOT TWO. A hidden badge must mean "checked, genuinely
+      // clean" - never "never checked" or "the last check failed". Review
+      // caught this: every non-success path used to return before touching
+      // the badge at all, so a health system that had never run once looked
+      // identical to one reporting all-clear. setBadgeUnknown() is the third
+      // state and every early-return path below now calls it.
+      function setBadgeUnknown() {
+        if (!badge) return;
+        badge.textContent = "?";
+        badge.classList.add("is-visible", "is-unknown");
+      }
+
+      function updateBadge(tickets, engines, partial) {
         const flagged = Array.isArray(engines) ? engines.filter(e => e && e.flagged) : [];
         const count = (Array.isArray(tickets) ? tickets.length : 0) + flagged.length;
         if (badge) {
+          badge.classList.remove("is-unknown");
           if (count > 0) {
-            badge.textContent = String(count);
+            // A "+" marks a PARTIAL enumeration (oe-doctor.ps1 hit an error
+            // reading part of the board) as an incomplete count, not a
+            // complete one - dropping `partial` here read as "definitely N",
+            // which is exactly the false confidence the tickets table's own
+            // health-row-partial styling exists to avoid one level up.
+            badge.textContent = partial ? `${count}+` : String(count);
             badge.classList.add("is-visible");
           } else {
             badge.classList.remove("is-visible");
@@ -5861,20 +5898,38 @@ def inject_health_panel_into_ringside_html(html: str) -> str:
         if (event.target === dialog) dialog.close();
       });
 
+      // THE SERVER ANSWERS AT MOST ONE CHECK AT A TIME (see /api/oe-health's
+      // own lock) - "a health check is already in progress" is a transient
+      // collision with the background poll below, not a real failure, and
+      // review caught that showing it as a terminal error strands an
+      // operator who clicked at the wrong instant with no way to see the
+      // check they actually wanted. One retry, after a short wait, covers
+      // it; a genuine second collision falls through to the normal error
+      // path rather than retrying forever.
+      const LOCK_CONTENTION_MESSAGE = "a health check is already in progress";
+      function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
       btn.addEventListener("click", async () => {
         btn.disabled = true;
         showRow("checking...");
         openDialog();
         try {
-          const res = await fetch("/api/oe-health");
-          const data = await res.json();
+          let res = await fetch("/api/oe-health");
+          let data = await res.json();
+          if (data && typeof data === "object" && data.error === LOCK_CONTENTION_MESSAGE) {
+            showRow("a check is already running - retrying...");
+            await sleep(1500);
+            res = await fetch("/api/oe-health");
+            data = await res.json();
+          }
           // Every branch below writes SOMETHING to tbody before returning -
           // a failed re-check must never leave the PREVIOUS verdict on
           // screen with no indication the refresh didn't happen.
           if (data && typeof data === "object" && data.error) {
             showRow(data.error);
+            setBadgeUnknown();
           } else if (data && Array.isArray(data.tickets)) {
-            updateBadge(data.tickets, data.engines);
+            updateBadge(data.tickets, data.engines, data.partial);
             if (!data.tickets.length) {
               showRow("no open findings");
             } else {
@@ -5896,9 +5951,11 @@ def inject_health_panel_into_ringside_html(html: str) -> str:
             renderEngines(data.engines);
           } else {
             showRow("unrecognized response from /api/oe-health");
+            setBadgeUnknown();
           }
         } catch (err) {
           showRow(String(err && err.message || err));
+          setBadgeUnknown();
         } finally {
           btn.disabled = false;
         }
@@ -5915,11 +5972,18 @@ def inject_health_panel_into_ringside_html(html: str) -> str:
           const res = await fetch("/api/oe-health");
           data = await res.json();
         } catch (err) {
+          setBadgeUnknown();
           return;
         }
-        if (!data || typeof data !== "object" || data.error) return;
-        if (!Array.isArray(data.tickets)) return;
-        const flagged = updateBadge(data.tickets, data.engines);
+        // EVERY EARLY RETURN BELOW MARKS THE BADGE UNKNOWN FIRST - this is
+        // the blocking finding from review: a silent poll that hits an
+        // error, a lock-contention response, or a shape it does not
+        // recognise used to just return, leaving the badge exactly as it
+        // was (hidden, on first load) - indistinguishable from "checked,
+        // nothing wrong". A "?" is the honest state for "could not tell".
+        if (!data || typeof data !== "object" || data.error) { setBadgeUnknown(); return; }
+        if (!Array.isArray(data.tickets)) { setBadgeUnknown(); return; }
+        const flagged = updateBadge(data.tickets, data.engines, data.partial);
 
         // A DESKTOP NOTIFICATION ONLY ON A NEW/CHANGED SIGNATURE, never on
         // every poll - the box already has its own OS-level watchdog for
@@ -5929,22 +5993,32 @@ def inject_health_panel_into_ringside_html(html: str) -> str:
         const signature = JSON.stringify({
           t: data.tickets.map(t => t.number).sort(),
           e: flagged.map(e => e.engine).sort(),
+          p: !!data.partial,
         });
         const count = data.tickets.length + flagged.length;
         if (notifySignature !== null && signature !== notifySignature && count > 0
             && typeof Notification !== "undefined" && Notification.permission === "granted") {
           try {
+            const partialNote = data.partial ? " (partial - some findings may be missing)" : "";
             new Notification("Open Engine needs a look", {
-              body: `${data.tickets.length} stuck ticket(s), ${flagged.length} flagged engine(s)`,
+              body: `${data.tickets.length} stuck ticket(s), ${flagged.length} flagged engine(s)${partialNote}`,
             });
           } catch (err) { /* notifications are a courtesy, never fatal */ }
         }
         notifySignature = signature;
       }
 
-      if (typeof Notification !== "undefined" && Notification.permission === "default") {
-        Notification.requestPermission().catch(() => {});
-      }
+      // GUARDED: on pre-16 Safari, Notification.requestPermission() throws
+      // SYNCHRONOUSLY when called without a legacy callback argument, rather
+      // than rejecting - review caught that an uncaught throw here killed
+      // the rest of installHealthPanel() before backgroundPoll()/
+      // setInterval() below ever ran, silently disabling the whole panel on
+      // that engine, badge included.
+      try {
+        if (typeof Notification !== "undefined" && Notification.permission === "default") {
+          Notification.requestPermission().catch(() => {});
+        }
+      } catch (err) { /* Notification support is a courtesy, never fatal */ }
 
       backgroundPoll();
       setInterval(backgroundPoll, 5 * 60 * 1000);
