@@ -1357,6 +1357,271 @@ class InjectHealthPanelTests(unittest.TestCase):
         self.assertIn('id="health-check-btn"', injected)
         self.assertIn("installHealthPanel();", injected)
 
+    # --- pass-2 review fixes: static pins ------------------------------------
+    # These pin the SHAPE of each fix (the literal that must exist / must not
+    # exist) so a future edit cannot silently reopen one of these holes without
+    # a test noticing. HealthPanelBehaviorTests below (a real node execution)
+    # is what actually proves the runtime behaviour these shapes are meant to
+    # produce - these are the cheap, fast backstop.
+
+    def test_lock_contention_message_matches_the_servers_own_string_exactly(self):
+        # The two literals (this one in JS, the other inside
+        # read_open_engine_doctor_health's handler) are duplicated on purpose
+        # - there is no shared constant between Python and injected JS - so
+        # nothing else catches one drifting from the other except a direct
+        # comparison. Reword the server's message and this test is what fails.
+        result = ringer.inject_health_panel_into_ringside_html(self._base_html())
+        match = re.search(r'LOCK_CONTENTION_MESSAGE = "([^"]+)"', result)
+        self.assertIsNotNone(match, "could not find LOCK_CONTENTION_MESSAGE in the injected script")
+        server_match = re.search(
+            r'"error":\s*"(a health check is already in progress)"',
+            ringer.__file__ and Path(ringer.__file__).read_text(encoding="utf-8"),
+        )
+        self.assertIsNotNone(server_match, "could not find the server's own lock-contention message")
+        self.assertEqual(match.group(1), server_match.group(1))
+
+    def test_lock_contention_retry_budget_is_not_shorter_than_the_servers_own_lock_timeout(self):
+        # Pass 1's single 1.5s retry against a lock the server can hold for up
+        # to 60s was mechanically sound and practically useless - review
+        # executed the repro and got the identical error back, 1.5s later.
+        # This does not need to know the exact server timeout, only that the
+        # client's patience is not trivially shorter than it.
+        result = ringer.inject_health_panel_into_ringside_html(self._base_html())
+        match = re.search(r"LOCK_CONTENTION_MAX_WAIT_MS = (\d+)", result)
+        self.assertIsNotNone(match, "could not find LOCK_CONTENTION_MAX_WAIT_MS in the injected script")
+        self.assertGreaterEqual(int(match.group(1)), 60_000)
+
+    def test_falsy_engines_array_element_is_dropped_not_carried_through(self):
+        # `!e || !e.flagged` let a null/undefined array element survive into
+        # the render loop (since `!e` is true for it), which then read
+        # e.flagged/e.rate/e.engine on it unconditionally - a TypeError
+        # replacing a correct verdict on screen. `e && !e.flagged` drops it.
+        result = ringer.inject_health_panel_into_ringside_html(self._base_html())
+        self.assertIn("engines.filter(e => e && !e.flagged)", result)
+        self.assertNotIn("engines.filter(e => !e || !e.flagged)", result)
+
+    def test_notification_signature_does_not_include_partial(self):
+        # `partial` flaps independently of the underlying finding (a
+        # transient upstream error, gone on the next poll) - folding it into
+        # the de-dup signature re-notifies for the SAME finding every time it
+        # flaps, which is the exact "don't re-notify on every poll" rule this
+        # signature exists to enforce, broken by its own new field.
+        result = ringer.inject_health_panel_into_ringside_html(self._base_html())
+        handler_start = result.index("async function backgroundPoll")
+        handler = result[handler_start:result.index("notifySignature = signature;", handler_start)]
+        sig_start = handler.index("const signature = JSON.stringify({")
+        sig_block = handler[sig_start:handler.index("});", sig_start)]
+        self.assertNotIn("partial", sig_block)
+        self.assertIn("t:", sig_block)
+        self.assertIn("e:", sig_block)
+
+    def test_badge_starts_unknown_before_the_first_poll_resolves(self):
+        # setBadgeUnknown() must be called SYNCHRONOUSLY, before the
+        # fire-and-forget backgroundPoll() call - otherwise there is a real
+        # window (up to the server's ~60s lock budget) where the badge is
+        # simply absent, which reads as "checked, all clear" to anyone
+        # loading the page during it.
+        result = ringer.inject_health_panel_into_ringside_html(self._base_html())
+        install_body = result[result.index("function installHealthPanel()"):result.index("installHealthPanel();")]
+        unknown_call = install_body.rindex("setBadgeUnknown();")
+        poll_call = install_body.index("backgroundPoll();")
+        self.assertLess(unknown_call, poll_call, "setBadgeUnknown() must run before the first backgroundPoll() call")
+
+    def test_notification_permission_is_requested_from_the_click_handler_not_unconditionally(self):
+        # An unconditional Notification.requestPermission() at install time
+        # does nothing on Firefox (which requires an actual user gesture) and
+        # is part of what trains Chrome into auto-blocking a site that asks
+        # without one. Moved to fire only inside the click handler, which IS
+        # a real gesture.
+        result = ringer.inject_health_panel_into_ringside_html(self._base_html())
+        handler_start = result.index("btn.addEventListener")
+        handler = result[handler_start:result.index("installHealthPanel();", handler_start)]
+        self.assertIn("Notification.requestPermission()", handler)
+        # And NOT also fired a second, unconditional time between the click
+        # handler and the final backgroundPoll()/installHealthPanel() calls.
+        tail = result[result.index("backgroundPoll();", handler_start) - 400:result.index("installHealthPanel();", handler_start)]
+        self.assertNotIn("requestPermission", tail)
+
+
+class HealthPanelBehaviorTests(unittest.TestCase):
+    """Executes the injected health-panel script under Node against a
+    stubbed DOM/fetch/Notification, rather than only pattern-matching its
+    source text - the InjectHealthPanelTests pins above catch a fix being
+    silently reverted, but pass-2 review found real logic bugs (a crash on a
+    falsy engines-array element, a badge that read "clean" during the
+    load-time poll's own in-flight window, a notification signature that
+    re-fired on a field that flaps independently of the actual finding) that
+    no amount of substring matching would have caught - only running the
+    code did. Same node-execution pattern as
+    ArtifactStateNormalizationTests above."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        node = shutil.which("node")
+        if node is None:
+            raise unittest.SkipTest("node not on PATH")
+        cls.node = node
+        base_html = (
+            "<style>\n    main {\n    }\n</style>\n"
+            '<body>\n      <time id="clock" class="clock mono"></time>\n'
+            "    <main>\n    </main>\n"
+            "<script>\n    tickClock();\n</script>\n</body>"
+        )
+        injected = ringer.inject_health_panel_into_ringside_html(base_html)
+        start = injected.index("function installHealthPanel()")
+        end = injected.index("installHealthPanel();", start) + len("installHealthPanel();")
+        cls.panel_js = injected[start:end]
+
+    def run_harness(self, probe_js: str) -> dict:
+        # A minimal DOM/fetch/Notification/timer stub, shared by every probe
+        # below. `console.log(JSON.stringify(...))` is how each probe reports
+        # its observation back to Python.
+        harness = f"""
+        class FakeClassList {{
+          constructor() {{ this.set = new Set(); }}
+          add(...names) {{ names.forEach(n => this.set.add(n)); }}
+          remove(...names) {{ names.forEach(n => this.set.delete(n)); }}
+          contains(n) {{ return this.set.has(n); }}
+        }}
+        class FakeEl {{
+          constructor(id) {{
+            this.id = id; this.classList = new FakeClassList(); this.hidden = true;
+            this.textContent = ""; this.innerHTML = ""; this.disabled = false;
+            this._listeners = {{}};
+          }}
+          querySelector() {{ return byId(this.id + "-tbody"); }}
+          addEventListener(type, fn) {{ this._listeners[type] = fn; }}
+          appendChild() {{}}
+          setAttribute() {{}}
+          showModal() {{}}
+          close() {{}}
+        }}
+        const els = {{}};
+        function byId(id) {{ if (!els[id]) els[id] = new FakeEl(id); return els[id]; }}
+        global.document = {{ getElementById: byId, createElement: () => new FakeEl("tr") }};
+
+        let fetchQueue = [];
+        let fetchCalls = 0;
+        global.fetch = async () => {{ fetchCalls++; const next = fetchQueue.shift(); return {{ json: async () => next }}; }};
+        let notifCount = 0;
+        global.Notification = function (title, opts) {{ notifCount++; }};
+        global.Notification.permission = "granted";
+        global.Notification.requestPermission = () => Promise.resolve("granted");
+        let sleptMs = [];
+        global.setTimeout = (fn, ms) => {{ sleptMs.push(ms); fn(); }};
+        let intervalFn = null;
+        global.setInterval = (fn) => {{ intervalFn = fn; }};
+
+        {self.panel_js}
+
+        (async () => {{
+          {probe_js}
+        }})();
+        """
+        result = subprocess.run(
+            [self.node, "--input-type=module", "-e", harness],
+            capture_output=True, text=True, timeout=15,
+        )
+        self.assertEqual(result.returncode, 0, f"stdout={result.stdout!r} stderr={result.stderr!r}")
+        lines = [ln for ln in result.stdout.strip().splitlines() if ln.strip()]
+        self.assertTrue(lines, f"harness produced no output; stderr={result.stderr!r}")
+        return json.loads(lines[-1])
+
+    def test_badge_shows_unknown_immediately_then_clean_after_first_poll_resolves(self):
+        out = self.run_harness("""
+          fetchQueue = [{ tickets: [], engines: [], errors: [], partial: false }];
+          installHealthPanel();
+          const badge = els["health-badge"];
+          const beforeResolve = { text: badge.textContent, unknown: badge.classList.contains("is-unknown"), visible: badge.classList.contains("is-visible") };
+          await new Promise(r => setImmediate(r));
+          const afterResolve = { text: badge.textContent, unknown: badge.classList.contains("is-unknown"), visible: badge.classList.contains("is-visible") };
+          console.log(JSON.stringify({ beforeResolve, afterResolve }));
+        """)
+        self.assertEqual(out["beforeResolve"], {"text": "?", "unknown": True, "visible": True})
+        self.assertEqual(out["afterResolve"], {"text": "?", "unknown": False, "visible": False})
+
+    def test_falsy_engines_element_does_not_crash_the_click_handler(self):
+        # NOT an uncaught-throw check - the click handler's OWN try/catch
+        # swallows any exception from renderEngines() and converts it into
+        # showRow(err.message), so a version of this test that only checked
+        # for an escaped exception would pass against BROKEN code too (it
+        # did, until this was caught): the crash still happens, it just
+        # never leaves the handler. What distinguishes crash from no-crash
+        # is the RENDERED RESULT - a crash overwrites "no open findings"
+        # with the TypeError's own message.
+        out = self.run_harness("""
+          // installHealthPanel() fires its own load-time backgroundPoll()
+          // immediately (fire-and-forget) - queue a throwaway response for
+          // THAT first, and let it resolve, before queuing the one the
+          // click handler is meant to consume; otherwise the two race for
+          // the same queue entry.
+          fetchQueue = [{ tickets: [], engines: [], errors: [], partial: false }];
+          installHealthPanel();
+          await new Promise(r => setImmediate(r));
+
+          fetchQueue = [{ tickets: [], engines: [null, { engine: "x", flagged: false, rate: 90, ok: 9, recent: 10, span_hrs: 1, credit_dead: 0, advice: "" }], errors: [], partial: false }];
+          await els["health-check-btn"]._listeners.click();
+          const tbody = els["health-table-tbody"];
+          console.log(JSON.stringify({ tbodyHtml: tbody ? tbody.innerHTML : null }));
+        """)
+        self.assertIn("no open findings", out["tbodyHtml"] or "")
+        self.assertNotIn("Cannot read prop", out["tbodyHtml"] or "")
+
+    def test_partial_true_with_zero_findings_reads_as_unknown_not_clean(self):
+        out = self.run_harness("""
+          fetchQueue = [{ tickets: [], engines: [], errors: [], partial: false }];
+          installHealthPanel();
+          await new Promise(r => setImmediate(r));
+          fetchQueue = [{ tickets: [], engines: [], errors: [], partial: true }];
+          await els["health-check-btn"]._listeners.click();
+          const badge = els["health-badge"];
+          console.log(JSON.stringify({ text: badge.textContent, unknown: badge.classList.contains("is-unknown"), visible: badge.classList.contains("is-visible") }));
+        """)
+        self.assertEqual(out, {"text": "?", "unknown": True, "visible": True})
+
+    def test_lock_contention_retry_polls_multiple_times_not_once(self):
+        out = self.run_harness("""
+          fetchQueue = [{ tickets: [], engines: [], errors: [], partial: false }];
+          installHealthPanel();
+          await new Promise(r => setImmediate(r));
+          fetchQueue = [
+            { error: "a health check is already in progress" },
+            { error: "a health check is already in progress" },
+            { tickets: [{ number: 1, severity: "stuck", kind: "x", evidence: "y", fix: "z" }], engines: [], errors: [], partial: false },
+          ];
+          sleptMs = []; fetchCalls = 0;
+          await els["health-check-btn"]._listeners.click();
+          console.log(JSON.stringify({ fetchCalls, sleptMs, badgeText: els["health-badge"].textContent }));
+        """)
+        self.assertGreaterEqual(out["fetchCalls"], 3)
+        self.assertGreaterEqual(len(out["sleptMs"]), 2)
+        self.assertEqual(out["badgeText"], "1")
+
+    def test_partial_flapping_alone_does_not_re_notify_but_a_real_change_does(self):
+        out = self.run_harness("""
+          fetchQueue = [{ tickets: [], engines: [], errors: [], partial: false }];
+          installHealthPanel();
+          await new Promise(r => setImmediate(r));
+
+          notifCount = 0;
+          fetchQueue = [{ tickets: [{ number: 9, severity: "stuck" }], engines: [], errors: [], partial: false }];
+          await intervalFn();
+          const afterFirst = notifCount;
+
+          fetchQueue = [{ tickets: [{ number: 9, severity: "stuck" }], engines: [], errors: [], partial: true }];
+          await intervalFn();
+          const afterPartialFlap = notifCount;
+
+          fetchQueue = [{ tickets: [{ number: 9, severity: "stuck" }, { number: 10, severity: "stuck" }], engines: [], errors: [], partial: true }];
+          await intervalFn();
+          const afterRealChange = notifCount;
+
+          console.log(JSON.stringify({ afterFirst, afterPartialFlap, afterRealChange }));
+        """)
+        self.assertEqual(out["afterFirst"], 1)
+        self.assertEqual(out["afterPartialFlap"], 1, "partial flapping alone must not re-trigger a notification")
+        self.assertEqual(out["afterRealChange"], 2, "a genuinely new ticket must still notify")
+
 
 if __name__ == "__main__":
     unittest.main()

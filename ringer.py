@@ -5730,8 +5730,37 @@ def inject_health_panel_into_ringside_html(html: str) -> str:
     }
     .health-row-partial { opacity: .6; }
     .health-empty { color: var(--muted); font-size: 13px; padding: 16px 0; }
+    .health-check-btn { position: relative; }
+    .health-badge {
+      display: none;
+      margin-left: 6px;
+      padding: 1px 6px;
+      border-radius: 8px;
+      font-size: 11px;
+      font-weight: 700;
+      background: var(--fail, #c0392b);
+      color: #fff;
+    }
+    .health-badge.is-visible { display: inline-block; }
+    /* UNKNOWN is distinct from a red count - a "?" the operator has to
+       investigate is a different signal from "N findings", and both must be
+       distinct from the badge being hidden (a genuinely clean check). */
+    .health-badge.is-unknown { background: var(--muted, #6b7280); }
+    .health-subhead {
+      margin: 18px 0 4px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    /* A row worth acting on must stand out, not fade - .health-row-partial's
+       opacity: .6 is right for "this data is incomplete" (the tickets table)
+       but backwards for "this engine is failing" (the engines table), which
+       is exactly what review found: the urgent rows rendered faintest. */
+    .health-row-flagged { color: var(--fail, #c0392b); font-weight: 700; }
 """
-    button = """      <button id="health-check-btn" type="button" class="health-check-btn mono">Check Health</button>
+    button = """      <button id="health-check-btn" type="button" class="health-check-btn mono">Check Health<span id="health-badge" class="health-badge mono"></span></button>
 """
     dialog = """      <dialog id="health-dialog" class="mono" aria-label="Open Engine health">
         <div class="health-dialog-head">
@@ -5743,16 +5772,25 @@ def inject_health_panel_into_ringside_html(html: str) -> str:
             <thead><tr><th>#</th><th>Severity</th><th>Kind</th><th>Evidence</th><th>Fix</th></tr></thead>
             <tbody></tbody>
           </table>
+          <div id="health-engines-head" class="health-subhead" hidden>Engines</div>
+          <table id="health-engines-table" class="health-table" hidden>
+            <thead><tr><th>Engine</th><th>Rate</th><th>Window</th><th>Note</th></tr></thead>
+            <tbody></tbody>
+          </table>
         </div>
       </dialog>
 """
     script = r"""
     function installHealthPanel() {
       const btn = document.getElementById("health-check-btn");
+      const badge = document.getElementById("health-badge");
       const dialog = document.getElementById("health-dialog");
       const closeBtn = document.getElementById("health-dialog-close");
       const table = document.getElementById("health-table");
       const tbody = table ? table.querySelector("tbody") : null;
+      const engHead = document.getElementById("health-engines-head");
+      const engTable = document.getElementById("health-engines-table");
+      const engBody = engTable ? engTable.querySelector("tbody") : null;
       if (!btn || !dialog || !closeBtn || !table || !tbody) return;
 
       function html(value) {
@@ -5767,11 +5805,102 @@ def inject_health_panel_into_ringside_html(html: str) -> str:
       function showRow(message) {
         table.hidden = false;
         tbody.innerHTML = `<tr><td colspan="5" class="health-empty">${html(message)}</td></tr>`;
+        // A message row (checking/error/empty) replaces the tickets table's
+        // content, so any engines table left over from a PREVIOUS successful
+        // check must not keep showing stale data underneath it.
+        if (engHead) engHead.hidden = true;
+        if (engTable) engTable.hidden = true;
       }
 
       function openDialog() {
         if (typeof dialog.showModal === "function") dialog.showModal();
         else dialog.setAttribute("open", "");
+      }
+
+      function renderEngines(engines) {
+        if (!engHead || !engTable || !engBody) return;
+        if (!Array.isArray(engines) || !engines.length) {
+          engHead.hidden = true;
+          engTable.hidden = true;
+          return;
+        }
+        const flagged = engines.filter(e => e && e.flagged);
+        engBody.innerHTML = "";
+        // Flagged engines first - that is the part worth seeing without
+        // scrolling past every healthy/parked row. `e && !e.flagged`, NOT
+        // `!e || !e.flagged` - the latter let a falsy (null/undefined) array
+        // element survive into `ordered` (since `!e` is true for it), and
+        // the loop below reads e.flagged/e.rate/e.engine unconditionally -
+        // review reproduced this as a raw TypeError replacing a correct
+        // verdict on screen.
+        const ordered = flagged.concat(engines.filter(e => e && !e.flagged));
+        for (const e of ordered) {
+          const row = document.createElement("tr");
+          // FLAGGED, not health-row-partial - that class means "incomplete
+          // data" elsewhere on this page and fades the row; a flagged engine
+          // is the opposite of incomplete, it is the finding.
+          if (e.flagged) row.classList.add("health-row-flagged");
+          let rate = e.rate === null || e.rate === undefined ? "no scored runs" : `${e.rate}% (${e.ok}/${e.recent})`;
+          // credit_dead is why a low OK/RECENT ratio is honest rather than
+          // misleading (a credit-parked engine's dead launches are excluded
+          // from the ratio already) - dropping it here would silently
+          // reintroduce the exact distortion oe-doctor.ps1's own text report
+          // exists to avoid.
+          if (e.credit_dead) rate += ` [${e.credit_dead} credit-dead excluded]`;
+          row.innerHTML = [
+            `<td>${html(e.engine)}</td>`,
+            `<td>${html(rate)}</td>`,
+            `<td>${html(e.span_hrs)}h</td>`,
+            `<td>${html(e.advice)}</td>`,
+          ].join("");
+          engBody.appendChild(row);
+        }
+        engHead.hidden = false;
+        engTable.hidden = false;
+      }
+
+      // BADGE, SHARED BY THE CLICK HANDLER AND THE BACKGROUND POLL BELOW.
+      // Reflects the last successful check regardless of whether the dialog
+      // is open - this is the "visible without an extra click" part.
+      //
+      // THREE STATES, NOT TWO. A hidden badge must mean "checked, genuinely
+      // clean" - never "never checked" or "the last check failed". Review
+      // caught this: every non-success path used to return before touching
+      // the badge at all, so a health system that had never run once looked
+      // identical to one reporting all-clear. setBadgeUnknown() is the third
+      // state and every early-return path below now calls it.
+      function setBadgeUnknown() {
+        if (!badge) return;
+        badge.textContent = "?";
+        badge.classList.add("is-visible", "is-unknown");
+      }
+
+      function updateBadge(tickets, engines, partial) {
+        const flagged = Array.isArray(engines) ? engines.filter(e => e && e.flagged) : [];
+        const count = (Array.isArray(tickets) ? tickets.length : 0) + flagged.length;
+        if (badge) {
+          badge.classList.remove("is-unknown");
+          if (count > 0) {
+            // A "+" marks a PARTIAL enumeration (oe-doctor.ps1 hit an error
+            // reading part of the board) as an incomplete count, not a
+            // complete one - dropping `partial` here read as "definitely N",
+            // which is exactly the false confidence the tickets table's own
+            // health-row-partial styling exists to avoid one level up.
+            badge.textContent = partial ? `${count}+` : String(count);
+            badge.classList.add("is-visible");
+          } else if (partial) {
+            // ZERO FOUND ON AN INCOMPLETE SCAN IS NOT THE SAME CLAIM AS ZERO
+            // FOUND ON A COMPLETE ONE - review caught that `partial` only
+            // reached the badge inside the count > 0 branch, so a scan that
+            // errored out having found nothing YET still rendered as a
+            // hidden, all-clear badge. Reuse the unknown state rather than
+            // inventing a fourth one: both mean "cannot vouch for zero".
+            setBadgeUnknown();
+          } else {
+            badge.classList.remove("is-visible");
+          }
+        }
+        return flagged;
       }
 
       closeBtn.addEventListener("click", () => dialog.close());
@@ -5782,19 +5911,64 @@ def inject_health_panel_into_ringside_html(html: str) -> str:
         if (event.target === dialog) dialog.close();
       });
 
+      // THE SERVER ANSWERS AT MOST ONE CHECK AT A TIME (see /api/oe-health's
+      // own lock, which the server holds for up to a 60s budget around the
+      // doctor subprocess it spawns) - "a health check is already in
+      // progress" is a transient collision with the background poll below,
+      // not a real failure, and review caught that showing it as a terminal
+      // error strands an operator who clicked at the wrong instant with no
+      // way to see the check they actually wanted.
+      //
+      // POLLED FOR UP TO ~65s, NOT A SINGLE SHORT RETRY. A prior version
+      // waited 1.5s once - review executed the actual repro and found the
+      // lock routinely outlives that by 40x, so the "retry" just added 1.5s
+      // of latency in front of the identical unhelpful error. The cap here
+      // is deliberately a little past the server's own 60s budget: long
+      // enough to outlast a genuine in-flight check, short enough that a
+      // second, independently-stuck collision still surfaces as an error
+      // rather than hanging the dialog forever.
+      const LOCK_CONTENTION_MESSAGE = "a health check is already in progress";
+      const LOCK_CONTENTION_MAX_WAIT_MS = 65000;
+      const LOCK_CONTENTION_POLL_MS = 3000;
+      function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
       btn.addEventListener("click", async () => {
         btn.disabled = true;
         showRow("checking...");
         openDialog();
+        // GESTURE-TRIGGERED, ON THE FIRST CLICK ONLY - a click is a real
+        // user gesture, which Firefox requires before it will even ask; an
+        // unconditional call at page load (the prior version) either does
+        // nothing there or reads as an unprompted request, which is part of
+        // what trains Chrome to auto-block the origin's notifications
+        // entirely. Still guarded on Notification.permission === "default"
+        // so this fires at most once regardless of how many times the
+        // button is clicked.
         try {
-          const res = await fetch("/api/oe-health");
-          const data = await res.json();
+          if (typeof Notification !== "undefined" && Notification.permission === "default") {
+            Notification.requestPermission().catch(() => {});
+          }
+        } catch (err) { /* Notification support is a courtesy, never fatal */ }
+        try {
+          let res = await fetch("/api/oe-health");
+          let data = await res.json();
+          let waitedMs = 0;
+          while (data && typeof data === "object" && data.error === LOCK_CONTENTION_MESSAGE
+                 && waitedMs < LOCK_CONTENTION_MAX_WAIT_MS) {
+            showRow(`a check is already running - waiting... (${Math.round(waitedMs / 1000)}s)`);
+            await sleep(LOCK_CONTENTION_POLL_MS);
+            waitedMs += LOCK_CONTENTION_POLL_MS;
+            res = await fetch("/api/oe-health");
+            data = await res.json();
+          }
           // Every branch below writes SOMETHING to tbody before returning -
           // a failed re-check must never leave the PREVIOUS verdict on
           // screen with no indication the refresh didn't happen.
           if (data && typeof data === "object" && data.error) {
             showRow(data.error);
+            setBadgeUnknown();
           } else if (data && Array.isArray(data.tickets)) {
+            updateBadge(data.tickets, data.engines, data.partial);
             if (!data.tickets.length) {
               showRow("no open findings");
             } else {
@@ -5813,15 +5987,90 @@ def inject_health_panel_into_ringside_html(html: str) -> str:
               }
               table.hidden = false;
             }
+            renderEngines(data.engines);
           } else {
             showRow("unrecognized response from /api/oe-health");
+            setBadgeUnknown();
           }
         } catch (err) {
           showRow(String(err && err.message || err));
+          setBadgeUnknown();
         } finally {
           btn.disabled = false;
         }
       });
+
+      // BACKGROUND POLL, SEPARATE FROM THE CLICK HANDLER ABOVE. A silent poll
+      // must never open the dialog or touch its content - only the badge -
+      // so it cannot interrupt whatever the operator is doing or clobber a
+      // verdict currently on screen from a deliberate check.
+      let notifySignature = null;
+      async function backgroundPoll() {
+        let data;
+        try {
+          const res = await fetch("/api/oe-health");
+          data = await res.json();
+        } catch (err) {
+          setBadgeUnknown();
+          return;
+        }
+        // EVERY EARLY RETURN BELOW MARKS THE BADGE UNKNOWN FIRST - this is
+        // the blocking finding from review: a silent poll that hits an
+        // error, a lock-contention response, or a shape it does not
+        // recognise used to just return, leaving the badge exactly as it
+        // was (hidden, on first load) - indistinguishable from "checked,
+        // nothing wrong". A "?" is the honest state for "could not tell".
+        if (!data || typeof data !== "object" || data.error) { setBadgeUnknown(); return; }
+        if (!Array.isArray(data.tickets)) { setBadgeUnknown(); return; }
+        const flagged = updateBadge(data.tickets, data.engines, data.partial);
+
+        // A DESKTOP NOTIFICATION ONLY ON A NEW/CHANGED SIGNATURE, never on
+        // every poll - the box already has its own OS-level watchdog for
+        // this; this is a courtesy for whoever has the tab open, and firing
+        // it every 5 minutes for an already-known problem would just teach
+        // the operator to ignore it.
+        //
+        // IDENTITY IS TICKETS + ENGINES ONLY - `partial` is NOT part of the
+        // signature. It flaps independently of the underlying finding (a
+        // transient `gh` API error on one poll, gone on the next) while the
+        // actual stuck tickets stay constant - review executed exactly that
+        // sequence and got 3 toasts for one finding when `partial` was
+        // folded into the identity. `partial` still reaches the human via
+        // the notification body text below, just not the de-dup key.
+        const signature = JSON.stringify({
+          t: data.tickets.map(t => t.number).sort(),
+          e: flagged.map(e => e.engine).sort(),
+        });
+        const count = data.tickets.length + flagged.length;
+        if (notifySignature !== null && signature !== notifySignature && count > 0
+            && typeof Notification !== "undefined" && Notification.permission === "granted") {
+          try {
+            const partialNote = data.partial ? " (partial - some findings may be missing)" : "";
+            new Notification("Open Engine needs a look", {
+              body: `${data.tickets.length} stuck ticket(s), ${flagged.length} flagged engine(s)${partialNote}`,
+            });
+          } catch (err) { /* notifications are a courtesy, never fatal */ }
+        }
+        notifySignature = signature;
+      }
+
+      // Notification permission is requested from the click handler above
+      // (a real user gesture), not here - see its own comment for why an
+      // unconditional request at install time is wrong on more than one
+      // browser, not just the pre-16-Safari throw the try/catch there still
+      // guards against defensively.
+
+      // THE BADGE STARTS "UNKNOWN", NOT HIDDEN. backgroundPoll() below is
+      // async and the server can hold its single-check lock for up to a 60s
+      // budget (see the click handler's own comment on that same lock) -
+      // review found that every page load had a multi-second-to-60s window
+      // where the badge affirmed "all clear" having checked nothing yet.
+      // setBadgeUnknown() here makes that window honestly say "checking",
+      // and backgroundPoll() overwrites it the moment the first check
+      // actually resolves, success or failure either way.
+      setBadgeUnknown();
+      backgroundPoll();
+      setInterval(backgroundPoll, 5 * 60 * 1000);
     }
     installHealthPanel();
 """
