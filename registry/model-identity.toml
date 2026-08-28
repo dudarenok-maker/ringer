@@ -110,8 +110,8 @@ last_verified = 2026-07-10
 #   cline-free        Cline free tier, hard daily quota
 #   cline-glm         glm-5.2 on BytePlus ARK, Lite package
 #   cline-qwen-cloud  qwen3.7-max on the operator's Alibaba MaaS token plan
-#   cline-qwen-local  qwen38-agent-iq4 on this box's own Ollama, unmetered
-#   cline-muse-local  muse-glimmer-agent-64k on the same Ollama, unmetered
+#   cline-qwen-local  qwen38-agent-iq4-96k on this box's own GPUs (llama.cpp/llama-swap), unmetered
+#   cline-muse-local  muse-glimmer-agent-96k on the same GPUs (llama.cpp/llama-swap), unmetered
 #
 # Access values are operator-confirmed: the first three 2026-08-18, the qwen
 # cloud route 2026-08-20.
@@ -222,19 +222,32 @@ source = "lane session store ~/.cline-oe/cline-qwen-cloud/1/sessions/*/*.json re
 last_verified = 2026-08-20
 
 [engines.cline-qwen-local]
-# The same Cline runtime pointed at this box's own Ollama (`-P ollama`), so it
-# is metered by nothing and bounded by the GPU rather than a quota.
+# The same Cline runtime pointed at this box's own GPUs via llama.cpp/llama-swap
+# (`-P openai-compatible`, http://127.0.0.1:8090/v1 - see oe-tick.ps1's
+# $LaneProviderSources), so it is metered by nothing and bounded by the GPU
+# rather than a quota. Moved off Ollama's native provider 2026-08-25; the GGUF
+# weights are unchanged (hardlinked from the same Ollama blob store, no
+# re-download), only the serving stack and the id below changed.
 #
-# SAME MODEL AS [engines.copilot-qwen] BELOW - one Ollama tag, two harnesses
-# that have driven it - so that entry's provenance covers this one and is cited
-# unchanged rather than re-derived. Only the harness differs, which is the
-# column that exists to say so. Do not fork the identity into a second slug.
+# SAME WEIGHTS AS [engines.copilot-qwen] BELOW - one GGUF blob, two harnesses
+# that have driven it (copilot-qwen still talks to it through Ollama's own
+# provider and keeps that tag) - so that entry's provenance covers this one and
+# is cited unchanged rather than re-derived. Only the harness and serving stack
+# differ, which is the column/id that exists to say so. Do not fork the
+# identity into a second slug.
 harness = "Cline CLI"
-access = "Local (Ollama, unmetered)"
-default_model_key = "qwen38-agent-iq4:latest"
+access = "Local (llama.cpp/llama-swap, unmetered)"
+default_model_key = "qwen38-agent-iq4-96k"
 
-[engines.cline-qwen-local.models."qwen38-agent-iq4:latest"]
-display = "Qwen3.8 27B (agent IQ4 64k)"
+# NO ":latest" SUFFIX, UNLIKE copilot-qwen BELOW. This lane moved off Ollama
+# tags onto llama.cpp/llama-swap 2026-08-25 (oe-heartbeat.ps1's $clineModels
+# reports the bare id with no suffix); copilot-qwen still runs the real
+# Ollama tag and keeps it. Renamed to carry the context window (-96k) in the
+# id itself 2026-08-28, matching the muse-local rename below - both lanes
+# actually serve 98304 (96k) via llama-swap's config.yaml, not the 64k this
+# key/display previously implied.
+[engines.cline-qwen-local.models."qwen38-agent-iq4-96k"]
+display = "Qwen3.8 27B (agent IQ4 96k)"
 lab = "Alibaba"
 confidence = "verified"     # same local Ollama tag as copilot-qwen; provenance checked on box, not re-derived here
 source = "ollama /api/tags parent_model=qwen3.8:27b; registry manifest batiai/qwen3.8-27b:iq4 = 15.08 GB, probed 2026-08-19"
@@ -247,11 +260,16 @@ last_verified = 2026-08-19
 # slug and need this whole pass again. Same model as [engines.copilot-muse];
 # that entry's source is cited unchanged, for the same reason as above.
 harness = "Cline CLI"
-access = "Local (Ollama, unmetered)"
-default_model_key = "muse-glimmer-agent-64k:latest"
+access = "Local (llama.cpp/llama-swap, unmetered)"
+default_model_key = "muse-glimmer-agent-96k"
 
-[engines.cline-muse-local.models."muse-glimmer-agent-64k:latest"]
-display = "Muse Glimmer 30B (agent 64k)"
+# NO ":latest" SUFFIX, UNLIKE copilot-muse BELOW - see the matching comment on
+# cline-qwen-local above; same migration, same reason. Renamed 2026-08-28 to
+# carry the context window (-96k) in the id: llama-swap's config.yaml has
+# always served this model at 98304 (96k), the "64k" the old id/display
+# implied was stale from before the Ollama->llama.cpp move.
+[engines.cline-muse-local.models."muse-glimmer-agent-96k"]
+display = "Muse Glimmer 30B (agent 96k)"
 lab = "Meta"
 confidence = "verified"     # same local Ollama tag as copilot-muse
 source = "https://developer.meta.com/ai/lp/muse-glimmer/ - Meta, 30B params, Apache 2.0, an open model built for always-on local agents; this entry is a local build from the library/muse-glimmer weights blob sha256-71b5c9c9 with the vision projector omitted"
