@@ -118,10 +118,17 @@ last_verified = 2026-07-10
 #
 # THE CONFIDENCE SPLIT IS NOT ARBITRARY. The three metered slugs are NOT marked
 # verified - no lab source has been checked for them, and the taxonomy forbids
-# promoting a slug-derived identity without one. The two LOCAL slugs ARE
-# verified, because an Ollama tag can be probed on the box for its parent model
-# and manifest; each cites the copilot-* entry that did that probing, since one
-# tag driven by two harnesses is one identity, not two.
+# promoting a slug-derived identity without one. The two LOCAL model families
+# ARE verified, because their GGUF weights were probed on the box against an
+# Ollama tag for parent model and manifest. This is an append-only historical
+# table, not a "what does the lane run today" one: each local engine below
+# carries THREE model-key entries, one per serving-stack era this box has
+# actually run - the pre-2026-08-25 Ollama-native id (with the ":latest" tag
+# suffix), the 2026-08-25..08-28 bare llama.cpp/llama-swap id, and the
+# 2026-08-28-onward "-96k" id that carries the real context window. One model
+# surfaced under three ids across three eras is one identity, not three; each
+# entry cites the copilot-* entry that did the original probing, since the
+# weights themselves never changed.
 #
 # ONE CELL HERE IS A DEFAULT, NOT A FACT: an unattributed legacy row has no
 # model, so it resolves through the ENGINE block and inherits that engine's
@@ -239,13 +246,36 @@ harness = "Cline CLI"
 access = "Local (llama.cpp/llama-swap, unmetered)"
 default_model_key = "qwen38-agent-iq4-96k"
 
-# NO ":latest" SUFFIX, UNLIKE copilot-qwen BELOW. This lane moved off Ollama
-# tags onto llama.cpp/llama-swap 2026-08-25 (oe-heartbeat.ps1's $clineModels
-# reports the bare id with no suffix); copilot-qwen still runs the real
-# Ollama tag and keeps it. Renamed to carry the context window (-96k) in the
-# id itself 2026-08-28, matching the muse-local rename below - both lanes
-# actually serve 98304 (96k) via llama-swap's config.yaml, not the 64k this
-# key/display previously implied.
+# THREE ID FORMS, ONE MODEL, THREE SERVING-STACK ERAS. This is an append-only
+# historical-attribution table: runs.jsonl carries real rows under all three
+# ids and every one of them must resolve, not just whatever the lane reports
+# today.
+#   1. "qwen38-agent-iq4:latest"  - pre-2026-08-25, Ollama-native provider
+#      (`-P ollama`), the real Ollama tag with its ":latest" suffix.
+#   2. "qwen38-agent-iq4"         - 2026-08-25..08-28, just after the move to
+#      llama.cpp/llama-swap, before the -96k id rename landed; `-m` still
+#      passed the old bare Ollama-tag name with no suffix.
+#   3. "qwen38-agent-iq4-96k"     - 2026-08-28 onward (CURRENT, and the
+#      default_model_key above), carrying the real 98304 (96k) context window
+#      llama-swap's config.yaml has always served.
+# Do not collapse these into one entry by renaming in place - that orphans
+# whichever era's rows aren't the current one.
+
+[engines.cline-qwen-local.models."qwen38-agent-iq4:latest"]
+display = "Qwen3.8 27B (agent IQ4 64k)"
+lab = "Alibaba"
+access = "Local (Ollama, unmetered)"   # this era genuinely ran through Ollama's own provider
+confidence = "verified"     # same local Ollama tag as copilot-qwen; provenance checked on box, not re-derived here
+source = "ollama /api/tags parent_model=qwen3.8:27b; registry manifest batiai/qwen3.8-27b:iq4 = 15.08 GB, probed 2026-08-19"
+last_verified = 2026-08-19
+
+[engines.cline-qwen-local.models."qwen38-agent-iq4"]
+display = "Qwen3.8 27B (agent IQ4 64k)"
+lab = "Alibaba"
+confidence = "verified"     # same local Ollama tag as copilot-qwen; provenance checked on box, not re-derived here
+source = "ollama /api/tags parent_model=qwen3.8:27b; registry manifest batiai/qwen3.8-27b:iq4 = 15.08 GB, probed 2026-08-19; id form confirmed against real 2026-08-25..08-28 runs.jsonl rows"
+last_verified = 2026-08-28
+
 [engines.cline-qwen-local.models."qwen38-agent-iq4-96k"]
 display = "Qwen3.8 27B (agent IQ4 96k)"
 lab = "Alibaba"
@@ -263,11 +293,37 @@ harness = "Cline CLI"
 access = "Local (llama.cpp/llama-swap, unmetered)"
 default_model_key = "muse-glimmer-agent-96k"
 
-# NO ":latest" SUFFIX, UNLIKE copilot-muse BELOW - see the matching comment on
-# cline-qwen-local above; same migration, same reason. Renamed 2026-08-28 to
-# carry the context window (-96k) in the id: llama-swap's config.yaml has
-# always served this model at 98304 (96k), the "64k" the old id/display
-# implied was stale from before the Ollama->llama.cpp move.
+# THREE ID FORMS, ONE MODEL, THREE SERVING-STACK ERAS - see the matching
+# comment on cline-qwen-local above; same migration, same reason, this lane's
+# own three id strings:
+#   1. "muse-glimmer-agent-64k:latest" - pre-2026-08-25, Ollama-native
+#      provider (`-P ollama`), the real Ollama tag with its ":latest" suffix.
+#      This WAS this engine's only entry before 2026-08-28's rename; restored
+#      here rather than left orphaned.
+#   2. "muse-glimmer-agent-64k"        - 2026-08-25..08-28, just after the
+#      move to llama.cpp/llama-swap, before the -96k id rename landed; `-m`
+#      still passed the old bare Ollama-tag name with no suffix.
+#   3. "muse-glimmer-agent-96k"        - 2026-08-28 onward (CURRENT, and the
+#      default_model_key above), carrying the real 98304 (96k) context window
+#      llama-swap's config.yaml has always served.
+# Do not collapse these into one entry by renaming in place - that orphans
+# whichever era's rows aren't the current one.
+
+[engines.cline-muse-local.models."muse-glimmer-agent-64k:latest"]
+display = "Muse Glimmer 30B (agent 64k)"
+lab = "Meta"
+access = "Local (Ollama, unmetered)"   # this era genuinely ran through Ollama's own provider
+confidence = "verified"     # same local Ollama tag as copilot-muse
+source = "https://developer.meta.com/ai/lp/muse-glimmer/ - Meta, 30B params, Apache 2.0, an open model built for always-on local agents; this entry is a local build from the library/muse-glimmer weights blob sha256-71b5c9c9 with the vision projector omitted"
+last_verified = 2026-08-19
+
+[engines.cline-muse-local.models."muse-glimmer-agent-64k"]
+display = "Muse Glimmer 30B (agent 64k)"
+lab = "Meta"
+confidence = "verified"     # same local Ollama tag as copilot-muse
+source = "https://developer.meta.com/ai/lp/muse-glimmer/ - Meta, 30B params, Apache 2.0, an open model built for always-on local agents; this entry is a local build from the library/muse-glimmer weights blob sha256-71b5c9c9 with the vision projector omitted; id form confirmed against real 2026-08-25..08-28 runs.jsonl rows"
+last_verified = 2026-08-28
+
 [engines.cline-muse-local.models."muse-glimmer-agent-96k"]
 display = "Muse Glimmer 30B (agent 96k)"
 lab = "Meta"
