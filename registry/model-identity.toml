@@ -101,10 +101,17 @@ last_verified = 2026-07-10
 
 # ---------------------------------------------------------------------------
 # The Open Engine worker lanes on this box. SEVEN engine keys here are the SAME
-# Cline runtime on seven CONCURRENTLY AVAILABLE routes - not a succession, seven
-# live budgets - which is exactly why `access` is the column that separates
-# them. Harness is identical for all seven; only the route differs, so nothing
-# else in the row can tell them apart.
+# Cline runtime on seven CONCURRENTLY AVAILABLE routes - not a succession,
+# seven live budgets. Harness is identical for all seven, and for the first
+# five (cline through cline-muse-local's cloud/metered siblings) `access` is
+# what tells them apart. THAT BREAKS FOR THE THREE LOCAL LANES: they all run
+# on this box's own GPUs, so cline-qwen-local, cline-qwen-local-256k and
+# cline-muse-local share the identical `access` string
+# ("Local (llama.cpp/llama-swap, unmetered)") as well as harness - among
+# these three, only the model row (and, outside this table, oe-tick.ps1's
+# $LocalEngines, which serialises all three onto the same physical GPU
+# budget) actually distinguishes them. Do not read three local rows with
+# matching access as a bug; the model column is the discriminator there.
 #
 #   cline             Cline Pass, prepaid balance
 #   cline-free        Cline free tier, hard daily quota
@@ -120,28 +127,31 @@ last_verified = 2026-07-10
 # THE CONFIDENCE SPLIT IS NOT ARBITRARY. The three metered slugs are NOT marked
 # verified - no lab source has been checked for them, and the taxonomy forbids
 # promoting a slug-derived identity without one. The LOCAL model families ARE
-# verified, because their GGUF weights were probed on the box against an
-# Ollama tag for parent model and manifest (or, for cline-qwen-local-256k,
-# against the sibling entry it shares weights with). This is an append-only
-# historical table, not a "what does the lane run today" one: cline-qwen-local
-# and cline-muse-local below each carry FOUR model-key entries, one per
-# serving-stack/quant era this box has actually run - the pre-2026-08-25
-# Ollama-native id (with the ":latest" tag suffix), the 2026-08-25..08-28 bare
-# llama.cpp/llama-swap id, the 2026-08-28..08-30 "-96k" id, and the
-# 2026-08-30-onward current id. One model surfaced under multiple ids across
-# multiple eras is one identity, not several; each entry cites the copilot-*
-# entry that did the original probing where the weights are unchanged from
-# that probe.
+# verified: cline-qwen-local's and cline-muse-local's older eras because their
+# GGUF weights were probed on the box against an Ollama tag for parent model
+# and manifest; cline-qwen-local's 2026-08-30 era (qwen38-gsqrco-iq3-96k) and
+# cline-qwen-local-256k because that GGUF was sourced and probed directly on
+# box (see that entry's own `source` field) - NOT because it inherits the
+# older eras' Ollama-tag provenance, which is a different file. This is an
+# append-only historical table, not a "what does the lane run today" one:
+# cline-qwen-local and cline-muse-local below each carry FOUR model-key
+# entries, one per serving-stack/quant era - but "four eras" does not mean
+# "four eras with real runs.jsonl rows"; see each block's own era comment for
+# which ones actually have logged rows. One model surfaced under multiple ids
+# across multiple eras is one identity, not several.
 #
 # cline-qwen-local's 2026-08-30 era IS a real weights change, not just an id
 # rename like its predecessors: the dense IQ4 quant was replaced with
 # ISTA-DASLab's GSQ-RCO IQ3_XXS non-uniform quant of the SAME base model
 # (Qwen3.8-27B) - smaller file, per-tensor sensitivity-aware quantization
 # rather than uniform IQ4. The display name reflects that (quant name, not
-# just context), unlike cline-muse-local's 2026-08-30 entry below, which IS
-# the same GGUF as its "-96k" predecessor - only the served context number
-# changed (98304 -> 262144, the model's true native window, unlocked via
-# llama-server's --override-kv rather than a new file).
+# just context), and its provenance is cited independently rather than
+# inherited from the IQ4 eras below it (different GGUF, different bytes on
+# disk - see that entry). cline-muse-local's 2026-08-30 entry is different in
+# kind: it IS the same GGUF as its "-96k" predecessor - only the served
+# context number changed (98304 -> 262144, the model's true native window,
+# unlocked via llama-server's --override-kv rather than a new file) - so ITS
+# provenance is correctly inherited unchanged.
 #
 # ONE CELL HERE IS A DEFAULT, NOT A FACT: an unattributed legacy row has no
 # model, so it resolves through the ENGINE block and inherits that engine's
@@ -249,28 +259,43 @@ last_verified = 2026-08-20
 # weights are unchanged (hardlinked from the same Ollama blob store, no
 # re-download), only the serving stack and the id below changed.
 #
-# SAME WEIGHTS AS [engines.copilot-qwen] BELOW - one GGUF blob, two harnesses
+# SAME WEIGHTS AS [engines.copilot-qwen] BELOW, BUT ONLY FOR ERAS 1-3 (the
+# dense IQ4 quant era - see the four eras below). One GGUF blob, two harnesses
 # that have driven it (copilot-qwen still talks to it through Ollama's own
-# provider and keeps that tag) - so that entry's provenance covers this one and
-# is cited unchanged rather than re-derived. Only the harness and serving stack
-# differ, which is the column/id that exists to say so. Do not fork the
-# identity into a second slug.
+# provider and keeps that tag), so eras 1-3's provenance is cited from that
+# entry unchanged rather than re-derived. THIS DOES NOT COVER ERA 4
+# (qwen38-gsqrco-iq3-96k, the current default_model_key): that era is a
+# DIFFERENT GGUF file (10,094,357,632 bytes vs. copilot-qwen's/eras 1-3's
+# 15,082,507,136), sourced and probed independently - see that entry's own
+# `source` field, not this one. Do not fork eras 1-3's identity into a second
+# slug; era 4 already correctly is one, being genuinely different weights.
 harness = "Cline CLI"
 access = "Local (llama.cpp/llama-swap, unmetered)"
 default_model_key = "qwen38-gsqrco-iq3-96k"
 
 # FOUR ID FORMS ACROSS FOUR ERAS - THE LAST ONE A REAL WEIGHTS CHANGE, NOT
-# JUST A RENAME. This is an append-only historical-attribution table:
-# runs.jsonl carries real rows under all four ids and every one of them must
-# resolve, not just whatever the lane reports today.
+# JUST A RENAME. This is an append-only historical-attribution table, and
+# NOT every era below has actually logged a run: eras 1-2 have real
+# runs.jsonl rows (12 and 2 respectively, counted 2026-08-30); era 3 has
+# ZERO - it was configured but every dispatch attempt during its window
+# (2026-08-28..08-30) hit the "providers.json requests a model name that
+# doesn't match llama-swap's config key" routing bug fixed the same day era 4
+# landed (open-engine's providers.json said "qwen38-agent-iq4", llama-swap's
+# key was "qwen38-agent-iq4-96k" - confirmed live against the running
+# llama-swap instance: it returned "no router for requested model"), so the
+# lane silently never completed a real ticket under that id. Era 4 has none
+# yet either, being brand new. All four ids must still resolve if a row ever
+# does turn up under one - that is what makes this an append-only table - but
+# do not read "four eras" as "four eras with logged history".
 #   1. "qwen38-agent-iq4:latest"  - pre-2026-08-25, Ollama-native provider
 #      (`-P ollama`), the real Ollama tag with its ":latest" suffix.
 #   2. "qwen38-agent-iq4"         - 2026-08-25..08-28, just after the move to
 #      llama.cpp/llama-swap, before the -96k id rename landed; `-m` still
 #      passed the old bare Ollama-tag name with no suffix.
-#   3. "qwen38-agent-iq4-96k"     - 2026-08-28..08-30, carrying the real 98304
-#      (96k) context window llama-swap's config.yaml served that whole era -
-#      still the SAME dense IQ4 quant as eras 1-2.
+#   3. "qwen38-agent-iq4-96k"     - 2026-08-28..08-30, meant to carry the real
+#      98304 (96k) context window llama-swap's config.yaml declared for that
+#      whole era - still the SAME dense IQ4 quant as eras 1-2, but never
+#      actually dispatched a completed run (see above).
 #   4. "qwen38-gsqrco-iq3-96k"    - 2026-08-30 onward (CURRENT, and the
 #      default_model_key above). Unlike eras 1-3, this IS a weights change:
 #      ISTA-DASLab's GSQ-RCO IQ3_XXS non-uniform quant replaced the dense IQ4
@@ -326,15 +351,20 @@ default_model_key = "qwen38-gsqrco-iq3-256k"
 display = "Qwen3.8 27B (GSQ-RCO IQ3_XXS 256k)"
 lab = "Alibaba"
 confidence = "verified"     # identical weights to cline-qwen-local's "qwen38-gsqrco-iq3-96k" entry - see that entry's source
-source = "same GGUF as [engines.cline-qwen-local.models.\"qwen38-gsqrco-iq3-96k\"] - see that entry"
+source = "huggingface.co/ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF, IQ3_XXS.gguf = 10,094,357,632 bytes, pulled via `ollama pull hf.co/...` and hardlinked into C:\\Claude\\llama-cpp\\models\\qwen38-gsqrco-iq3.gguf 2026-08-30 - same file as [engines.cline-qwen-local.models.\"qwen38-gsqrco-iq3-96k\"], only the served context and GPU placement differ"
 last_verified = 2026-08-30
 
 [engines.cline-muse-local]
-# REGISTERED BEFORE ITS FIRST ROW, deliberately. The lane is configured and
-# currently parked by hand (held to 2026-08-27 while cline-qwen-local proves
-# the num_ctx fix), so its first run would otherwise land as an unregistered
-# slug and need this whole pass again. Same model as [engines.copilot-muse];
-# that entry's source is cited unchanged, for the same reason as above.
+# NO LONGER "registered before its first row" - that described this block's
+# original 2026-08-19 state, before eras 1-3 below had logged anything. All
+# three now have real runs.jsonl rows (3, 3 and 4 respectively, counted
+# 2026-08-30). Era 4 (muse-glimmer-agent-256k, added the same day) IS
+# registered before its first row, same reasoning as originally applied to
+# the whole block: it would otherwise land as an unregistered slug on its
+# first real dispatch and need this whole pass again. Same model as
+# [engines.copilot-muse]; that entry's source is cited unchanged, for the
+# same reason as above - the GGUF weights have never changed across any of
+# this lane's four eras (unlike cline-qwen-local's era 4).
 harness = "Cline CLI"
 access = "Local (llama.cpp/llama-swap, unmetered)"
 default_model_key = "muse-glimmer-agent-256k"
