@@ -6156,13 +6156,20 @@ def send_response_body(
     content_type: str,
     no_store: bool = False,
 ) -> None:
-    handler.send_response(status)
-    handler.send_header("Content-Type", content_type)
-    if no_store:
-        handler.send_header("Cache-Control", "no-store")
-    handler.send_header("Content-Length", str(len(body)))
-    handler.end_headers()
-    handler.wfile.write(body)
+    try:
+        handler.send_response(status)
+        handler.send_header("Content-Type", content_type)
+        if no_store:
+            handler.send_header("Cache-Control", "no-store")
+        handler.send_header("Content-Length", str(len(body)))
+        handler.end_headers()
+        handler.wfile.write(body)
+    except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+        # The client (a Ringside tab) went away mid-response - closed, reloaded,
+        # or navigated off while a slow endpoint (e.g. /api/oe-health's 60s
+        # subprocess-backed check) was still in flight. The socket is already
+        # dead; there's nothing to recover, so this is not a server fault.
+        pass
 
 
 def send_json_response(handler: BaseHTTPRequestHandler, data: dict[str, Any]) -> None:
