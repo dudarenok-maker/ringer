@@ -7,6 +7,7 @@ import os
 import sys
 import tempfile
 import unittest
+from http import HTTPStatus
 from pathlib import Path
 from unittest import mock
 from urllib.request import urlopen
@@ -173,6 +174,86 @@ class PersistentHudServerTests(unittest.TestCase):
         unknown_run = conn.getresponse()
         self.assertEqual(404, unknown_run.status)
         unknown_run.read()
+
+
+class SendResponseBodyClientDisconnectTests(unittest.TestCase):
+    """A client (Ringside tab) that goes away mid-response must not blow up
+    the request thread - e.g. closing/reloading the tab while /api/oe-health's
+    60s subprocess-backed check is still in flight."""
+
+    class FakeHandler:
+        def __init__(self, write_exc: Exception) -> None:
+            self.write_exc = write_exc
+
+            class FakeWfile:
+                def write(_self, _body: bytes) -> None:
+                    raise write_exc
+
+            self.wfile = FakeWfile()
+
+        def send_response(self, _status: HTTPStatus) -> None:
+            pass
+
+        def send_header(self, _name: str, _value: str) -> None:
+            pass
+
+        def end_headers(self) -> None:
+            pass
+
+    def test_write_raising_connection_aborted_error_does_not_propagate(self) -> None:
+        handler = self.FakeHandler(ConnectionAbortedError())
+        ringer.send_response_body(
+            handler,
+            HTTPStatus.OK,
+            b"{}",
+            content_type="application/json; charset=utf-8",
+        )
+
+    def test_write_raising_connection_reset_error_does_not_propagate(self) -> None:
+        handler = self.FakeHandler(ConnectionResetError())
+        ringer.send_response_body(
+            handler,
+            HTTPStatus.OK,
+            b"{}",
+            content_type="application/json; charset=utf-8",
+        )
+
+    def test_write_raising_broken_pipe_error_does_not_propagate(self) -> None:
+        handler = self.FakeHandler(BrokenPipeError())
+        ringer.send_response_body(
+            handler,
+            HTTPStatus.OK,
+            b"{}",
+            content_type="application/json; charset=utf-8",
+        )
+
+
+class SendErrorSafeClientDisconnectTests(unittest.TestCase):
+    """send_error() writes its own error-page body straight to wfile, same as
+    send_response_body() - the same client-disconnect race applies to every
+    404/501/500 path in the file, not just the JSON/artifact responses."""
+
+    class FakeHandler:
+        def __init__(self, send_error_exc: Exception) -> None:
+            self.send_error_exc = send_error_exc
+            self.called_with: HTTPStatus | None = None
+
+        def send_error(self, code: HTTPStatus) -> None:
+            self.called_with = code
+            raise self.send_error_exc
+
+    def test_send_error_raising_connection_aborted_error_does_not_propagate(self) -> None:
+        handler = self.FakeHandler(ConnectionAbortedError())
+        ringer.send_error_safe(handler, HTTPStatus.NOT_FOUND)
+        self.assertEqual(HTTPStatus.NOT_FOUND, handler.called_with)
+
+    def test_send_error_raising_connection_reset_error_does_not_propagate(self) -> None:
+        handler = self.FakeHandler(ConnectionResetError())
+        ringer.send_error_safe(handler, HTTPStatus.NOT_FOUND)
+
+    def test_send_error_raising_broken_pipe_error_does_not_propagate(self) -> None:
+        handler = self.FakeHandler(BrokenPipeError())
+        ringer.send_error_safe(handler, HTTPStatus.NOT_FOUND)
 
 
 if __name__ == "__main__":
