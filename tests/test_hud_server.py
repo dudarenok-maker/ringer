@@ -228,5 +228,33 @@ class SendResponseBodyClientDisconnectTests(unittest.TestCase):
         )
 
 
+class SendErrorSafeClientDisconnectTests(unittest.TestCase):
+    """send_error() writes its own error-page body straight to wfile, same as
+    send_response_body() - the same client-disconnect race applies to every
+    404/501/500 path in the file, not just the JSON/artifact responses."""
+
+    class FakeHandler:
+        def __init__(self, send_error_exc: Exception) -> None:
+            self.send_error_exc = send_error_exc
+            self.called_with: HTTPStatus | None = None
+
+        def send_error(self, code: HTTPStatus) -> None:
+            self.called_with = code
+            raise self.send_error_exc
+
+    def test_send_error_raising_connection_aborted_error_does_not_propagate(self) -> None:
+        handler = self.FakeHandler(ConnectionAbortedError())
+        ringer.send_error_safe(handler, HTTPStatus.NOT_FOUND)
+        self.assertEqual(HTTPStatus.NOT_FOUND, handler.called_with)
+
+    def test_send_error_raising_connection_reset_error_does_not_propagate(self) -> None:
+        handler = self.FakeHandler(ConnectionResetError())
+        ringer.send_error_safe(handler, HTTPStatus.NOT_FOUND)
+
+    def test_send_error_raising_broken_pipe_error_does_not_propagate(self) -> None:
+        handler = self.FakeHandler(BrokenPipeError())
+        ringer.send_error_safe(handler, HTTPStatus.NOT_FOUND)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

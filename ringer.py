@@ -6172,6 +6172,16 @@ def send_response_body(
         pass
 
 
+def send_error_safe(handler: BaseHTTPRequestHandler, code: HTTPStatus) -> None:
+    # BaseHTTPRequestHandler.send_error() writes its own error-page body
+    # straight to wfile, same as send_response_body() - same client-disconnect
+    # race, same fix.
+    try:
+        handler.send_error(code)
+    except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+        pass
+
+
 def send_json_response(handler: BaseHTTPRequestHandler, data: dict[str, Any]) -> None:
     body = json.dumps(data, sort_keys=True).encode("utf-8")
     send_response_body(
@@ -6304,7 +6314,7 @@ def serve_artifact_path(handler: BaseHTTPRequestHandler, artifact_root: Path, pa
             raise FileNotFoundError
         body = artifact_path.read_bytes()
     except (FileNotFoundError, OSError):
-        handler.send_error(HTTPStatus.NOT_FOUND)
+        send_error_safe(handler, HTTPStatus.NOT_FOUND)
         return True
     send_response_body(
         handler,
@@ -6403,16 +6413,16 @@ class PersistentHudServer:
                     try:
                         resolved = target.resolve()
                         if resolved != artifact_root_dir and artifact_root_dir not in resolved.parents:
-                            self.send_error(HTTPStatus.NOT_FOUND)
+                            send_error_safe(self, HTTPStatus.NOT_FOUND)
                             return
                         if sys.platform == "darwin":
                             subprocess.Popen(["open", str(resolved)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                             self.send_response(HTTPStatus.NO_CONTENT)
                             self.end_headers()
                         else:
-                            self.send_error(HTTPStatus.NOT_IMPLEMENTED)
+                            send_error_safe(self, HTTPStatus.NOT_IMPLEMENTED)
                     except Exception:
-                        self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR)
+                        send_error_safe(self, HTTPStatus.INTERNAL_SERVER_ERROR)
                     return
                 if path == "/api/oe-health":
                     # Each check spawns a 60s-budget powershell.exe subprocess
@@ -6448,19 +6458,19 @@ class PersistentHudServer:
                     return
                 if path.startswith("/artifacts/"):
                     if not serve_artifact_path(self, artifact_root, path):
-                        self.send_error(HTTPStatus.NOT_FOUND)
+                        send_error_safe(self, HTTPStatus.NOT_FOUND)
                     return
                 if path.startswith("/logs/"):
                     relative = path[len("/logs/") :]
                     if "/" not in relative:
-                        self.send_error(HTTPStatus.NOT_FOUND)
+                        send_error_safe(self, HTTPStatus.NOT_FOUND)
                         return
                     run_id_raw, task_key_raw = relative.split("/", 1)
                     run_id = urllib.parse.unquote(run_id_raw)
                     task_key = urllib.parse.unquote(task_key_raw)
                     log_path = hud_task_log_path(state_dir, run_id, task_key)
                     if log_path is None or not log_path.is_file():
-                        self.send_error(HTTPStatus.NOT_FOUND)
+                        send_error_safe(self, HTTPStatus.NOT_FOUND)
                         return
                     body = tail_file_text(log_path, max_bytes=WORKER_LOG_TAIL_BYTES).encode("utf-8")
                     send_response_body(
@@ -6471,7 +6481,7 @@ class PersistentHudServer:
                         no_store=True,
                     )
                     return
-                self.send_error(HTTPStatus.NOT_FOUND)
+                send_error_safe(self, HTTPStatus.NOT_FOUND)
 
             def log_message(self, _format: str, *_args: Any) -> None:
                 return
@@ -6555,7 +6565,7 @@ class Dashboard:
                     task_key = urllib.parse.unquote(path[len("/logs/") :])
                     log_path = task_log_path_from_state(state_path, task_key)
                     if log_path is None:
-                        self.send_error(HTTPStatus.NOT_FOUND)
+                        send_error_safe(self, HTTPStatus.NOT_FOUND)
                         return
                     body = tail_file_text(log_path, max_bytes=WORKER_LOG_TAIL_BYTES).encode("utf-8")
                     send_response_body(
@@ -6568,7 +6578,7 @@ class Dashboard:
                     return
                 if serve_artifact_path(self, artifact_root, path):
                     return
-                self.send_error(HTTPStatus.NOT_FOUND)
+                send_error_safe(self, HTTPStatus.NOT_FOUND)
 
             def log_message(self, _format: str, *_args: Any) -> None:
                 return
