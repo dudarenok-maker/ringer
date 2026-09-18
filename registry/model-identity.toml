@@ -116,7 +116,8 @@ last_verified = 2026-07-10
 #   cline             Cline Pass, prepaid balance
 #   cline-free        Cline free tier, hard daily quota
 #   cline-glm         glm-5.2 on BytePlus ARK, Lite package
-#   cline-qwen-cloud  qwen3.7-max on the operator's Alibaba MaaS token plan
+#   cline-qwen-cloud  qwen3.8-flash on the operator's Alibaba MaaS token plan
+#                     (was qwen3.7-max until 2026-09-19)
 #   cline-qwen-local  qwen38-gsqrco-iq3-96k on this box's own GPUs (llama.cpp/llama-swap), unmetered
 #   cline-qwen-local-256k  qwen38-gsqrco-iq3-256k, same GPUs, 256k ctx, unmetered
 #   cline-muse-local  muse-glimmer-agent-256k on the same GPUs (llama.cpp/llama-swap), unmetered
@@ -177,9 +178,22 @@ last_verified = 2026-08-18
 [engines.cline]
 harness = "Cline CLI"
 access = "Cline Pass"            # operator-confirmed 2026-08-18; prepaid balance
-default_model_key = "cline-pass/deepseek-v4-flash"
+default_model_key = "cline-pass/deepseek-v4.1-flash"
+
+[engines.cline.models."cline-pass/deepseek-v4.1-flash"]
+# deepseek-v4-flash -> deepseek-v4.1-flash 2026-09-19: ClinePass deprecated the
+# former effective 2026-09-21 (model-updates notice, received 2026-09-19). The
+# era below it is append-only history, not a live entry - do not delete it.
+display = "DeepSeek V4.1 Flash"
+lab = "DeepSeek"
+confidence = "unverified"   # slug-derived; DeepSeek's own model page has not been checked
+source = "live probe 2026-09-19: cline.exe -P cline-pass -m cline-pass/deepseek-v4.1-flash resolves"
+last_verified = 2026-09-19
 
 [engines.cline.models."cline-pass/deepseek-v4-flash"]
+# SUPERSEDED 2026-09-19 by the entry above (ClinePass deprecation). Kept for
+# every run logged before the cutover - do not collapse into the new entry,
+# same reasoning as every other append-only era table in this file.
 display = "DeepSeek V4 Flash"
 lab = "DeepSeek"
 confidence = "unverified"   # slug-derived; DeepSeek's own model page has not been checked
@@ -204,9 +218,20 @@ last_verified = 2026-08-18
 [engines.cline-free]
 harness = "Cline CLI"
 access = "Cline free tier"       # operator-confirmed 2026-08-18; hard daily quota
-default_model_key = "deepseek/deepseek-v4-flash"
+default_model_key = "deepseek/deepseek-v4.1-flash"
+
+[engines.cline-free.models."deepseek/deepseek-v4.1-flash"]
+# deepseek-v4-flash -> deepseek-v4.1-flash 2026-09-19: ClinePass deprecated the
+# former effective 2026-09-21 (model-updates notice, received 2026-09-19).
+display = "DeepSeek V4.1 Flash"
+lab = "DeepSeek"
+confidence = "unverified"
+source = "live probe 2026-09-19: cline.exe -P cline -m deepseek/deepseek-v4.1-flash resolves"
+last_verified = 2026-09-19
 
 [engines.cline-free.models."deepseek/deepseek-v4-flash"]
+# SUPERSEDED 2026-09-19 by the entry above - kept for every run logged before
+# the cutover, same append-only reasoning as elsewhere in this file.
 display = "DeepSeek V4 Flash"
 lab = "DeepSeek"
 confidence = "unverified"
@@ -242,9 +267,21 @@ last_verified = 2026-08-18
 # errors - which is exactly why `access` has to name the PLAN and not the flag.
 harness = "Cline CLI"
 access = "Alibaba MaaS token plan"   # operator-confirmed 2026-08-20; a token plan, not a subscription
-default_model_key = "qwen3.7-max"
+default_model_key = "qwen3.8-flash"
+
+[engines.cline-qwen-cloud.models."qwen3.8-flash"]
+# qwen3.7-max -> qwen3.8-flash 2026-09-19, operator's request (unrelated to
+# the ClinePass deprecation above - a separate Alibaba MaaS endpoint that
+# ClinePass has no say over).
+display = "Qwen3.8 Flash"
+lab = "Alibaba"
+confidence = "unverified"   # slug-derived; Alibaba's own model page has not been checked, so this is not promoted
+source = "live probe 2026-09-19: cline.exe -P openai-compatible -m qwen3.8-flash resolves against the Alibaba MaaS token-plan endpoint"
+last_verified = 2026-09-19
 
 [engines.cline-qwen-cloud.models."qwen3.7-max"]
+# SUPERSEDED 2026-09-19 by the entry above - kept for every run logged before
+# the cutover, same append-only reasoning as elsewhere in this file.
 display = "Qwen3.7 Max"
 lab = "Alibaba"
 confidence = "unverified"   # slug-derived; Alibaba's own model page has not been checked, so this is not promoted
