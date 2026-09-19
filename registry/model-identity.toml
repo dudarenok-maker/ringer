@@ -230,7 +230,7 @@ display = "DeepSeek V4.1 Flash"
 lab = "DeepSeek"
 access = "Cline free tier"
 confidence = "unverified"
-source = "same live probe as [engines.cline-free.models.\"deepseek/deepseek-v4.1-flash\"] below (cline.exe -P cline -m deepseek/deepseek-v4.1-flash resolves) - this entry exists to keep a forced-free-route run attributed correctly if it is ever logged under the `cline` engine key instead of `cline-free`"
+source = "live probe 2026-09-19: cline.exe -P cline-pass -m deepseek/deepseek-v4.1-flash resolves - i.e. the bare slug still forces the free route even under the PASS provider flag, same as era 1's entry proved for the old id; this entry exists to keep that forced-free-route run attributed correctly if it is ever logged under the `cline` engine key instead of `cline-free`"
 last_verified = 2026-09-19
 
 [engines.cline-free]
