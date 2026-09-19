@@ -24,6 +24,7 @@ from ringer import (  # noqa: E402
     WorkerResult,
     aggregate_model_log_rows,
     aggregate_model_scoreboard_rows,
+    default_model_registry_path,
     load_model_identity_registry,
     model_log_row_counts_toward_score,
     model_log_row_is_retry,
@@ -439,6 +440,105 @@ lab = "LabCo"
         )
         self.assertEqual(len(rollup), 2)
         self.assertEqual(sum(g["tasks"] for g in rollup), 3)
+
+
+class RealRegistryDefaultsTests(unittest.TestCase):
+    """The tests above all use a synthetic registry, which cannot catch a gap
+    in the REAL committed one - a slug present in `default_model_key` but
+    missing its own `[engines.*.models."..."]` table entry parses fine and
+    resolves through the "unregistered" fallback silently, which is exactly
+    the shape that shipped once (PR ringer#9, commit ae6642d before the fix):
+    the `deepseek/deepseek-v4.1-flash` override under the `cline` engine key
+    was missing, so a free-route run logged that way would have been
+    attributed to "Cline Pass" instead of "Cline free tier".
+    """
+
+    def _real_registry(self):
+        return load_model_identity_registry(default_model_registry_path())
+
+    def test_the_real_registry_loads_through_the_real_loader(self) -> None:
+        # Not the EMPTY_MODEL_IDENTITY_REGISTRY fallback a missing/unparsable
+        # file would silently substitute - every assertion below is only
+        # meaningful if this one holds.
+        registry = self._real_registry()
+        self.assertGreater(len(registry.identities), 0)
+        self.assertGreater(len(registry.defaults), 0)
+
+    def test_every_engines_default_model_key_resolves_registered(self) -> None:
+        # A default that resolves through resolve()'s unregistered fallback
+        # (ringer.py's ModelIdentity(unregistered=True) branch) is not a bug
+        # in the loader - it is a missing models-table entry for a key the
+        # engine block itself claims is current. Assert none exist, for
+        # every engine, not just the three this PR touches.
+        registry = self._real_registry()
+        for engine, default_key in registry.defaults.items():
+            with self.subTest(engine=engine, default_key=default_key):
+                identity = registry.resolve(engine, default_key)
+                self.assertFalse(
+                    identity.unregistered,
+                    f"{engine}'s default_model_key {default_key!r} has no "
+                    "registered [engines.{engine}.models.\"{default_key}\"] "
+                    "entry - it would render as an unregistered slug",
+                )
+
+    def test_a_forced_free_route_run_still_attributes_to_free_tier(self) -> None:
+        # THE REGRESSION THIS CLASS EXISTS TO CATCH. A run can be logged with
+        # worker_engine="cline" (not "cline-free") when the free slug was
+        # forced through the pass provider - see
+        # [engines.cline.models."deepseek/deepseek-v4.1-flash"]'s own comment
+        # in registry/model-identity.toml. Without that override entry,
+        # resolve() falls through to the `cline` ENGINE block's default
+        # access ("Cline Pass"), silently crediting free-tier spend to the
+        # prepaid balance.
+        registry = self._real_registry()
+        identity = registry.resolve("cline", "deepseek/deepseek-v4.1-flash")
+        self.assertFalse(
+            identity.unregistered,
+            "deepseek/deepseek-v4.1-flash has no override under the cline "
+            "engine key - a forced-free-route run would be misattributed",
+        )
+        self.assertEqual(identity.access, "Cline free tier")
+
+        rows = [
+            {
+                "worker_engine": "cline-free",
+                "model": "deepseek/deepseek-v4.1-flash",
+                "task_type": "ops",
+                "run_id": "r1",
+                "task_key": "r1",
+                "verdict": "PASS",
+                "duration_ms": 1000,
+                "worker_tokens": 100,
+                "logged_at": "2026-09-19T10:00:00+00:00",
+            },
+            {
+                # Forced through the pass provider's CLI, same as era 1's
+                # documented incident - still free-tier spend.
+                "worker_engine": "cline",
+                "model": "deepseek/deepseek-v4.1-flash",
+                "task_type": "ops",
+                "run_id": "r2",
+                "task_key": "r2",
+                "verdict": "PASS",
+                "duration_ms": 1000,
+                "worker_tokens": 200,
+                "logged_at": "2026-09-19T11:00:00+00:00",
+            },
+        ]
+        groups = aggregate_model_log_rows(rows, task_type="ops", registry=registry)
+        free_tier_groups = [
+            g
+            for g in groups
+            if registry.resolve(g["engine"], g["model"]).access == "Cline free tier"
+        ]
+        self.assertEqual(
+            len(free_tier_groups),
+            1,
+            "both rows resolve to the same DeepSeek V4.1 Flash / Cline free "
+            "tier identity and must merge into one row, not split with one "
+            "side falling back to an unregistered/Cline-Pass identity",
+        )
+        self.assertEqual(free_tier_groups[0]["tasks"], 2)
 
 
 if __name__ == "__main__":
