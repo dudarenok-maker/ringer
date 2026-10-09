@@ -279,7 +279,7 @@ display = "DeepSeek V4.1 Flash"
 lab = "DeepSeek"
 access = "Cline free tier"
 confidence = "unverified"
-source = "live probe 2026-09-19 under the retired `cline` key: cline.exe -P cline-pass -m deepseek/deepseek-v4.1-flash resolves to the free route; not re-probed under cline-pass-deepseek41flash, which shares the template"
+source = "live probe 2026-09-19 under the retired `cline` key: cline.exe -P cline-pass -m deepseek/deepseek-v4.1-flash resolves; free-route billing per the 2026-08-15 daily-cap hit on the era-1 slug; not re-probed under cline-pass-deepseek41flash, which shares the template"
 last_verified = 2026-09-19
 
 [engines.cline-pass-glm53]
@@ -305,7 +305,7 @@ display = "DeepSeek V4.1 Flash"
 lab = "DeepSeek"
 access = "Cline free tier"
 confidence = "unverified"
-source = "live probe 2026-09-19 under the retired `cline` key: cline.exe -P cline-pass -m deepseek/deepseek-v4.1-flash resolves to the free route; not re-probed under cline-pass-glm53, which shares the template"
+source = "live probe 2026-09-19 under the retired `cline` key: cline.exe -P cline-pass -m deepseek/deepseek-v4.1-flash resolves; free-route billing per the 2026-08-15 daily-cap hit on the era-1 slug; not re-probed under cline-pass-glm53, which shares the template"
 last_verified = 2026-09-19
 
 [engines.cline-pass-ds4pro]
@@ -331,7 +331,7 @@ display = "DeepSeek V4.1 Flash"
 lab = "DeepSeek"
 access = "Cline free tier"
 confidence = "unverified"
-source = "live probe 2026-09-19 under the retired `cline` key: cline.exe -P cline-pass -m deepseek/deepseek-v4.1-flash resolves to the free route; not re-probed under cline-pass-ds4pro, which shares the template"
+source = "live probe 2026-09-19 under the retired `cline` key: cline.exe -P cline-pass -m deepseek/deepseek-v4.1-flash resolves; free-route billing per the 2026-08-15 daily-cap hit on the era-1 slug; not re-probed under cline-pass-ds4pro, which shares the template"
 last_verified = 2026-09-19
 
 [engines.cline-free]

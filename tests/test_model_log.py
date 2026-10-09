@@ -548,16 +548,33 @@ class RealRegistryDefaultsTests(unittest.TestCase):
         # {model_args}` template, and the forced-free-route is a property of
         # that provider flag (probe 2026-09-19), not of the engine key. Each
         # needs the same override or a bare-slug run is credited to the pass.
+        #
+        # Keys are DERIVED from the registry (every engine on the prepaid
+        # pass), so a fourth pass lane registered without the override fails
+        # here instead of silently crediting a free-route run to the pass.
+        # The merge assertion also catches an override whose display/lab was
+        # copied from the lane row above it.
         registry = self._real_registry()
-        for engine in (
+        slug = "deepseek/deepseek-v4.1-flash"
+        pass_engines = [
+            e for e, m in registry.engine_meta.items() if m.access == "Cline Pass"
+        ]
+        for expected in (
+            "cline",
             "cline-pass-deepseek41flash",
             "cline-pass-glm53",
             "cline-pass-ds4pro",
         ):
+            self.assertIn(expected, pass_engines)
+        free_key = model_group_identity_key("cline-free", slug, registry)
+        for engine in pass_engines:
             with self.subTest(engine=engine):
-                identity = registry.resolve(engine, "deepseek/deepseek-v4.1-flash")
+                identity = registry.resolve(engine, slug)
                 self.assertFalse(identity.unregistered)
                 self.assertEqual(identity.access, "Cline free tier")
+                self.assertEqual(
+                    model_group_identity_key(engine, slug, registry), free_key
+                )
 
     def test_the_three_cline_pass_lane_keys_resolve_registered(self) -> None:
         # open-engine#97 split the single `cline` key into three lanes on the

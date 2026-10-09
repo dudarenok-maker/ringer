@@ -6929,8 +6929,13 @@ def model_group_identity_key(
     `cline-pass-deepseek41flash` (open-engine#97): same model, lab, harness
     and access, so one row.
 
-    Grouping on the RESOLVED identity merges exactly those cases and nothing
-    else. Any pair differing in model, lab, harness or access still keys
+    A forced-free-route run (the bare V4.1 slug) resolves to the `Cline free
+    tier` identity under ANY engine key that carries the override - `cline`,
+    each `cline-pass-*` key - and so merges with `cline-free`'s rows.
+
+    The rule: rows whose resolved display, lab, harness and access are all
+    identical merge, and nothing else does. The cases above are examples, not
+    a list. Any pair differing in model, lab, harness or access still keys
     apart: `cline` on the prepaid pass stays separate from `cline-free`
     because their access differs, and access is the distinction that actually
     governs spend. Measured against this box's own log before the change: 10
