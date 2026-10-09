@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import tempfile
 import unittest
@@ -377,7 +378,9 @@ lab = "LabCo"
 """
 
     def _registry(self):
-        tmp = Path(tempfile.mkdtemp()) / "model-identity.toml"
+        tmp_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        tmp = tmp_dir / "model-identity.toml"
         tmp.write_text(self.REGISTRY, encoding="utf-8")
         return load_model_identity_registry(tmp)
 
@@ -687,6 +690,7 @@ class MergedIdentityBucketTests(unittest.TestCase):
 
     def _payload(self, rows):
         tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         log = tmp / "eval.jsonl"
         log.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
         reg = tmp / "model-identity.toml"
@@ -775,8 +779,9 @@ class MergedIdentityBucketTests(unittest.TestCase):
         self.assertEqual(flags[0], flags[1])
         self.assertEqual({True}, flags[0])
 
-    def _payload_for(self, registry_text, order, rows_fn=None):
+    def _payload_for(self, registry_text, order):
         tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         log = tmp / "eval.jsonl"
         rows = [
             self._row(e, f"k{i}", "ops", f"2026-08-17T1{i}:00:00+00:00")
@@ -856,7 +861,9 @@ class MergedIdentityBucketTests(unittest.TestCase):
         # The mixed shape (aggregate WITHOUT a registry, enrich WITH one), as
         # tests/test_taxonomy.py does: the aggregator kept alpha and beta as
         # two rows, so they must not be handed one shared display_bucket_id.
-        tmp = Path(tempfile.mkdtemp()) / "model-identity.toml"
+        tmp_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        tmp = tmp_dir / "model-identity.toml"
         tmp.write_text(self.REGISTRY, encoding="utf-8")
         registry = load_model_identity_registry(tmp)
         rows = [
@@ -879,12 +886,23 @@ class RealRegistryMergeAgreementTests(unittest.TestCase):
     """Entries that merge into one scoreboard identity must agree on every
     per-entry field `enrich_model_groups_with_identity` still takes from the
     first-seen member (alias, misrouted, unregistered, identity_key,
-    canonical_route). `confidence`/`last_verified` are reconciled explicitly
-    (see MergedIdentityBucketTests); these are not, so a divergence would make
-    a merged row depend on log order. Fail loudly instead.
+    canonical_route), plus `confidence`. A merged row can only make one claim,
+    and "unverified" means "not yet researched", not "failed"
+    (registry/model-identity.toml:6-7) - so a verification on one member must
+    be propagated to all members, and this test is what forces that.
+    `last_verified` is reconciled explicitly (see MergedIdentityBucketTests);
+    the rest are not, so a divergence would make a merged row depend on log
+    order. Fail loudly instead.
     """
 
-    FIELDS = ("alias", "misrouted", "unregistered", "identity_key", "canonical_route")
+    FIELDS = (
+        "alias",
+        "misrouted",
+        "unregistered",
+        "identity_key",
+        "canonical_route",
+        "confidence",
+    )
 
     def test_merged_members_agree_on_first_seen_fields(self) -> None:
         registry = load_model_identity_registry(default_model_registry_path())
