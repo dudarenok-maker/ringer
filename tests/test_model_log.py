@@ -888,11 +888,13 @@ class RealRegistryMergeAgreementTests(unittest.TestCase):
     first-seen member (alias, misrouted, unregistered, identity_key,
     canonical_route), plus `confidence`. A merged row can only make one claim,
     and "unverified" means "not yet researched", not "failed"
-    (registry/model-identity.toml:6-7) - so a verification on one member must
-    be propagated to all members, and this test is what forces that.
-    `last_verified` is reconciled explicitly (see MergedIdentityBucketTests);
-    the rest are not, so a divergence would make a merged row depend on log
-    order. Fail loudly instead.
+    (registry/model-identity.toml:6-7) - so a verification belongs on every
+    member of the group, and this test fails until each one carries it.
+    `confidence` is reconciled with `last_verified` at runtime (see
+    MergedIdentityBucketTests), but it must still agree here so the registry
+    itself makes the same claim for every member. The other fields are not
+    reconciled, so a divergence would make a merged row depend on log order.
+    Fail loudly instead.
     """
 
     FIELDS = (
@@ -926,9 +928,21 @@ class RealRegistryMergeAgreementTests(unittest.TestCase):
             ]
             for other, (e, m) in zip(fields[1:], group[1:]):
                 with self.subTest(identity=identity, member=(e, m)):
+                    detail = "\n".join(
+                        f"  {f}: "
+                        + "; ".join(
+                            f"{ge}/{gm}={gf[f]!r}"
+                            for (ge, gm), gf in zip(group, fields)
+                        )
+                        for f in self.FIELDS
+                        if fields[0][f] != other[f]
+                    )
                     self.assertEqual(
                         fields[0], other,
-                        f"{group[0]} and {(e, m)} merge into one row but disagree",
+                        f"{len(group)} registry entries merge into one row but "
+                        f"disagree; a verification belongs on EVERY member, so "
+                        f"promote all of them. Full group, per disagreeing "
+                        f"field:\n{detail}",
                     )
 
 
