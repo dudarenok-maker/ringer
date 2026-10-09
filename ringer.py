@@ -6925,13 +6925,17 @@ def model_group_identity_key(
     carry different numbers - which a reader can only read as the scoreboard
     being broken, since nothing on screen explains the split.
 
-    Grouping on the RESOLVED identity merges exactly that case and nothing
+    The same holds for the retired `cline` pass key and its successor
+    `cline-pass-deepseek41flash` (open-engine#97): same model, lab, harness
+    and access, so one row.
+
+    Grouping on the RESOLVED identity merges exactly those cases and nothing
     else. Any pair differing in model, lab, harness or access still keys
     apart: `cline` on the prepaid pass stays separate from `cline-free`
     because their access differs, and access is the distinction that actually
     governs spend. Measured against this box's own log before the change: 10
     distinct (engine, model) keys collapse to 9 identities - one merge, the
-    intended one.
+    intended one (the cline/cline-free case; the cline-pass pair came later).
 
     registry=None preserves the historical (engine, model) behaviour, so
     callers without a registry - and the tests that pin the old shape - are
