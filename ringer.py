@@ -6948,6 +6948,24 @@ def model_group_identity_key(
     )
 
 
+def model_reasoning_effort_identity_keys(
+    rows: list[dict[str, Any]],
+    registry: "ModelIdentityRegistry | None",
+) -> set[tuple[Any, ...]]:
+    """`model_reasoning_effort_keys`, lifted from raw engines to identities.
+
+    A merged identity row stands for several raw engines, so "did this model
+    record an effort" has to be asked of the whole identity: the answer used
+    to be whichever raw engine the grouping met first, which made
+    `show_reasoning_effort` depend on log order. Rule: ANY merged engine that
+    recorded an effort turns the label on for the merged row.
+    """
+    return {
+        (model_group_identity_key(engine, model, registry), unattributed)
+        for engine, model, unattributed in model_reasoning_effort_keys(rows)
+    }
+
+
 def aggregate_model_log_rows(
     rows: list[dict[str, Any]],
     *,
@@ -6956,7 +6974,7 @@ def aggregate_model_log_rows(
     registry: "ModelIdentityRegistry | None" = None,
 ) -> list[dict[str, Any]]:
     groups: dict[tuple[Any, ...], dict[str, Any]] = {}
-    effort_keys = model_reasoning_effort_keys(rows)
+    effort_keys = model_reasoning_effort_identity_keys(rows, registry)
     for task_rows in group_model_log_tasks(rows):
         ordered = sorted(
             task_rows,
@@ -6992,8 +7010,9 @@ def aggregate_model_log_rows(
                 "task_type": group_task_type,
                 "reasoning_effort": reasoning_effort,
                 "show_reasoning_effort": (
-                    (group_engine, group_model, unattributed) in effort_keys
-                ),
+                    model_group_identity_key(group_engine, group_model, registry),
+                    unattributed,
+                ) in effort_keys,
                 "unattributed": unattributed,
                 "tasks": 0,
                 "attempts": 0,
@@ -7435,6 +7454,11 @@ def enrich_model_groups_with_identity(
     catalog_by_id = catalog_models_by_id(catalog_models or [])
     identity_rows: dict[tuple[Any, ...], dict[str, Any]] = {}
     latest: dict[tuple[Any, ...], str] = {}
+    # A merged identity row spans several raw engines whose registry entries
+    # may carry different `last_verified` dates. Rule: the merged row shows the
+    # NEWEST date among them (ISO dates compare as text), never the first
+    # engine's - so the label does not depend on log order.
+    verified_by_identity: dict[tuple[Any, ...], str] = {}
     for row in task_final_rows(rows):
         if model_log_row_is_reserved_fixture(row):
             continue
@@ -7458,6 +7482,11 @@ def enrich_model_groups_with_identity(
                     catalog_identity_fields(model_log_text(row.get("model")), catalog_by_id)
                 )
             identity_rows[key] = identity
+        if not unattributed:
+            verified = registry.resolve(group_engine, group_model).last_verified
+            ikey = (*model_group_identity_key(group_engine, group_model, registry), key[2:])
+            if verified > verified_by_identity.get(ikey, ""):
+                verified_by_identity[ikey] = verified
     enriched: list[dict[str, Any]] = []
     for group in groups:
         key = (
@@ -7494,6 +7523,23 @@ def enrich_model_groups_with_identity(
                 },
             )
         )
+        if not item.get("unattributed"):
+            ikey = (
+                *model_group_identity_key(
+                    str(group.get("engine") or ""), str(group.get("model") or ""), registry
+                ),
+                (
+                    (str(group.get("task_type") or ""),) if include_task_type else ()
+                ) + (group.get("reasoning_effort"), False),
+            )
+            item["last_verified"] = verified_by_identity.get(ikey, item.get("last_verified", ""))
+        # bucket_id comes from the RESOLVED identity, the same key the
+        # aggregators group on - not the first-seen raw engine, which differs
+        # between the rollup and each task-type grouping once two engines
+        # merge and orphans the breakdown in Ringside's groupsFor().
+        bucket_identity = model_group_identity_key(
+            str(group.get("engine") or ""), str(group.get("model") or ""), registry
+        )
         if item.get("unregistered") and str(item.get("model") or "").startswith("openrouter/"):
             if item.get("model_display") == item.get("model"):
                 item["model_display"] = short_model_name(item.get("model"))
@@ -7512,8 +7558,7 @@ def enrich_model_groups_with_identity(
             )
         item["bucket_id"] = "|".join(
             (
-                str(item.get("engine") or ""),
-                str(item.get("model") or ""),
+                *(str(part) for part in bucket_identity),
                 str(item.get("reasoning_effort") or ""),
                 "unattributed" if item.get("unattributed") else "model",
             )
@@ -8488,7 +8533,7 @@ def aggregate_model_scoreboard_rows(
     registry: "ModelIdentityRegistry | None" = None,
 ) -> list[dict[str, Any]]:
     models: dict[tuple[Any, ...], dict[str, Any]] = {}
-    effort_keys = model_reasoning_effort_keys(rows)
+    effort_keys = model_reasoning_effort_identity_keys(rows, registry)
     for task_rows in group_model_log_tasks(rows):
         ordered = sorted(
             task_rows,
@@ -8522,8 +8567,9 @@ def aggregate_model_scoreboard_rows(
                 "model": group_model,
                 "reasoning_effort": reasoning_effort,
                 "show_reasoning_effort": (
-                    (group_engine, group_model, unattributed) in effort_keys
-                ),
+                    model_group_identity_key(group_engine, group_model, registry),
+                    unattributed,
+                ) in effort_keys,
                 "unattributed": unattributed,
                 "tasks": 0,
                 "attempts": 0,

@@ -24,6 +24,7 @@ from ringer import (  # noqa: E402
     WorkerResult,
     aggregate_model_log_rows,
     aggregate_model_scoreboard_rows,
+    build_models_api_payload,
     default_model_registry_path,
     load_model_identity_registry,
     model_log_row_counts_toward_score,
@@ -539,6 +540,136 @@ class RealRegistryDefaultsTests(unittest.TestCase):
             "side falling back to an unregistered/Cline-Pass identity",
         )
         self.assertEqual(free_tier_groups[0]["tasks"], 2)
+
+
+class MergedIdentityBucketTests(unittest.TestCase):
+    """A merged identity row and its breakdown must share ONE bucket_id.
+
+    Ringside's `groupsFor()` joins the per-task-type `groups` to the `rollup`
+    row on `display_bucket_id`. When two engines resolve to one identity the
+    merged row used to keep whichever raw engine each grouping met first, so
+    the rollup and a task-type group could carry different bucket_ids and the
+    group silently never rendered (rollup Tasks 5, breakdown `ops 0`).
+    """
+
+    REGISTRY = ScoreboardIdentityGroupingTests.REGISTRY
+
+    def _payload(self, rows):
+        tmp = Path(tempfile.mkdtemp())
+        log = tmp / "eval.jsonl"
+        log.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+        reg = tmp / "model-identity.toml"
+        reg.write_text(self.REGISTRY, encoding="utf-8")
+        return build_models_api_payload(
+            log_path=log,
+            db_path=tmp / "none.db",
+            catalog_path=tmp / "catalog.json",
+            registry_path=reg,
+            notes_path=tmp / "notes.md",
+        )
+
+    @staticmethod
+    def _row(engine, key, task_type, when, **extra):
+        return {
+            "worker_engine": engine,
+            "model": "m/one",
+            "task_type": task_type,
+            "run_id": key,
+            "task_key": key,
+            "verdict": "PASS",
+            "duration_ms": 1000,
+            "worker_tokens": 10,
+            "logged_at": when,
+            **extra,
+        }
+
+    def _merged_rows(self):
+        # alpha is met first overall (rollup keeps alpha); the first `ticket`
+        # task is beta's (the ticket group keeps beta) - the order that split
+        # the bucket_ids.
+        return [
+            self._row("alpha", "a1", "ops", "2026-08-17T10:00:00+00:00"),
+            self._row("beta", "b1", "ticket", "2026-08-17T11:00:00+00:00"),
+            self._row("alpha", "a2", "ticket", "2026-08-17T12:00:00+00:00"),
+        ]
+
+    def test_breakdown_groups_share_the_rollups_bucket_id(self) -> None:
+        payload = self._payload(self._merged_rows())
+        free = [r for r in payload["rollup"] if r["access"] == "Free tier"]
+        self.assertEqual(1, len(free))
+        rollup = free[0]
+        self.assertEqual(3, rollup["tasks"])
+        matched = [
+            g for g in payload["groups"]
+            if g["display_bucket_id"] == rollup["display_bucket_id"]
+        ]
+        self.assertEqual(
+            {"ops", "ticket"}, {g["task_type"] for g in matched},
+            "every task-type group of the merged identity must match the rollup",
+        )
+
+    def test_breakdown_task_counts_sum_to_the_rollup(self) -> None:
+        payload = self._payload(self._merged_rows())
+        rollup = next(r for r in payload["rollup"] if r["access"] == "Free tier")
+        matched = [
+            g for g in payload["groups"]
+            if g["display_bucket_id"] == rollup["display_bucket_id"]
+        ]
+        self.assertEqual(rollup["tasks"], sum(g["tasks"] for g in matched))
+
+    def test_distinct_identities_keep_distinct_bucket_ids(self) -> None:
+        # THE CONTROL: gamma differs only in access and must not be folded in.
+        rows = self._merged_rows() + [
+            self._row("gamma", "g1", "ops", "2026-08-17T13:00:00+00:00")
+        ]
+        payload = self._payload(rows)
+        ids = [r["display_bucket_id"] for r in payload["rollup"]]
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertEqual(2, len(ids))
+
+    def test_show_reasoning_effort_does_not_depend_on_row_order(self) -> None:
+        # Only beta ever recorded an effort. Whichever engine is met first, the
+        # merged row must agree (any engine of the identity recorded one).
+        a = self._row("alpha", "a1", "ops", "2026-08-17T10:00:00+00:00")
+        b = self._row(
+            "beta", "b1", "ops", "2026-08-17T11:00:00+00:00", reasoning_effort="high"
+        )
+        flags = []
+        for rows in ([a, b], [b, a]):
+            payload = self._payload(rows)
+            flags.append(
+                {r["show_reasoning_effort"] for r in payload["rollup"]}
+                | {g["show_reasoning_effort"] for g in payload["groups"]}
+            )
+        self.assertEqual(flags[0], flags[1])
+        self.assertEqual({True}, flags[0])
+
+    def test_last_verified_does_not_depend_on_row_order(self) -> None:
+        reg = self.REGISTRY.replace(
+            '[engines.beta.models."m/one"]\n',
+            '[engines.beta.models."m/one"]\nlast_verified = "2026-07-10"\n',
+        )
+        results = []
+        for order in (("alpha", "beta"), ("beta", "alpha")):
+            tmp = Path(tempfile.mkdtemp())
+            log = tmp / "eval.jsonl"
+            rows = [
+                self._row(e, f"k{i}", "ops", f"2026-08-17T1{i}:00:00+00:00")
+                for i, e in enumerate(order)
+            ]
+            log.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+            (tmp / "model-identity.toml").write_text(reg, encoding="utf-8")
+            payload = build_models_api_payload(
+                log_path=log, db_path=tmp / "none.db",
+                catalog_path=tmp / "catalog.json",
+                registry_path=tmp / "model-identity.toml",
+                notes_path=tmp / "notes.md",
+            )
+            results.append(
+                [r["last_verified"] for r in payload["rollup"] if r["access"] == "Free tier"]
+            )
+        self.assertEqual(results[0], results[1])
+        self.assertEqual(["2026-07-10"], results[0])
 
 
 if __name__ == "__main__":
