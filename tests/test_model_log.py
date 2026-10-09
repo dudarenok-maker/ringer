@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import tempfile
 import unittest
@@ -24,12 +25,16 @@ from ringer import (  # noqa: E402
     WorkerResult,
     aggregate_model_log_rows,
     aggregate_model_scoreboard_rows,
+    build_models_api_payload,
     default_model_registry_path,
     load_model_identity_registry,
     model_group_identity_key,
     model_log_row_counts_toward_score,
     model_log_row_is_retry,
     read_model_log_rows,
+    render_model_table_pair,
+    row_identity_fields,
+    enrich_model_groups_with_identity,
 )
 
 LONG_SPEC = (
@@ -373,7 +378,9 @@ lab = "LabCo"
 """
 
     def _registry(self):
-        tmp = Path(tempfile.mkdtemp()) / "model-identity.toml"
+        tmp_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        tmp = tmp_dir / "model-identity.toml"
         tmp.write_text(self.REGISTRY, encoding="utf-8")
         return load_model_identity_registry(tmp)
 
@@ -667,6 +674,276 @@ class RealRegistryDefaultsTests(unittest.TestCase):
         self.assertFalse(
             registry.resolve("cline-pass-deepseek41flash", slug).unregistered
         )
+
+
+class MergedIdentityBucketTests(unittest.TestCase):
+    """A merged identity row and its breakdown must share ONE bucket_id.
+
+    Ringside's `groupsFor()` joins the per-task-type `groups` to the `rollup`
+    row on `display_bucket_id`. When two engines resolve to one identity the
+    merged row used to keep whichever raw engine each grouping met first, so
+    the rollup and a task-type group could carry different bucket_ids and the
+    group silently never rendered (rollup Tasks 5, breakdown `ops 0`).
+    """
+
+    REGISTRY = ScoreboardIdentityGroupingTests.REGISTRY
+
+    def _payload(self, rows):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        log = tmp / "eval.jsonl"
+        log.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+        reg = tmp / "model-identity.toml"
+        reg.write_text(self.REGISTRY, encoding="utf-8")
+        return build_models_api_payload(
+            log_path=log,
+            db_path=tmp / "none.db",
+            catalog_path=tmp / "catalog.json",
+            registry_path=reg,
+            notes_path=tmp / "notes.md",
+        )
+
+    @staticmethod
+    def _row(engine, key, task_type, when, **extra):
+        return {
+            "worker_engine": engine,
+            "model": "m/one",
+            "task_type": task_type,
+            "run_id": key,
+            "task_key": key,
+            "verdict": "PASS",
+            "duration_ms": 1000,
+            "worker_tokens": 10,
+            "logged_at": when,
+            **extra,
+        }
+
+    def _merged_rows(self):
+        # alpha is met first overall (rollup keeps alpha); the first `ticket`
+        # task is beta's (the ticket group keeps beta) - the order that split
+        # the bucket_ids.
+        return [
+            self._row("alpha", "a1", "ops", "2026-08-17T10:00:00+00:00"),
+            self._row("beta", "b1", "ticket", "2026-08-17T11:00:00+00:00"),
+            self._row("alpha", "a2", "ticket", "2026-08-17T12:00:00+00:00"),
+        ]
+
+    def test_breakdown_groups_share_the_rollups_bucket_id(self) -> None:
+        payload = self._payload(self._merged_rows())
+        free = [r for r in payload["rollup"] if r["access"] == "Free tier"]
+        self.assertEqual(1, len(free))
+        rollup = free[0]
+        self.assertEqual(3, rollup["tasks"])
+        matched = [
+            g for g in payload["groups"]
+            if g["display_bucket_id"] == rollup["display_bucket_id"]
+        ]
+        self.assertEqual(
+            {"ops", "ticket"}, {g["task_type"] for g in matched},
+            "every task-type group of the merged identity must match the rollup",
+        )
+
+    def test_breakdown_task_counts_sum_to_the_rollup(self) -> None:
+        payload = self._payload(self._merged_rows())
+        rollup = next(r for r in payload["rollup"] if r["access"] == "Free tier")
+        matched = [
+            g for g in payload["groups"]
+            if g["display_bucket_id"] == rollup["display_bucket_id"]
+        ]
+        self.assertEqual(rollup["tasks"], sum(g["tasks"] for g in matched))
+
+    def test_distinct_identities_keep_distinct_bucket_ids(self) -> None:
+        # THE CONTROL: gamma differs only in access and must not be folded in.
+        rows = self._merged_rows() + [
+            self._row("gamma", "g1", "ops", "2026-08-17T13:00:00+00:00")
+        ]
+        payload = self._payload(rows)
+        ids = [r["display_bucket_id"] for r in payload["rollup"]]
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertEqual(2, len(ids))
+
+    def test_show_reasoning_effort_does_not_depend_on_row_order(self) -> None:
+        # Only beta ever recorded an effort. Whichever engine is met first, the
+        # merged row must agree (any engine of the identity recorded one).
+        a = self._row("alpha", "a1", "ops", "2026-08-17T10:00:00+00:00")
+        b = self._row(
+            "beta", "b1", "ops", "2026-08-17T11:00:00+00:00", reasoning_effort="high"
+        )
+        flags = []
+        for rows in ([a, b], [b, a]):
+            payload = self._payload(rows)
+            flags.append(
+                {r["show_reasoning_effort"] for r in payload["rollup"]}
+                | {g["show_reasoning_effort"] for g in payload["groups"]}
+            )
+        self.assertEqual(flags[0], flags[1])
+        self.assertEqual({True}, flags[0])
+
+    def _payload_for(self, registry_text, order):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        log = tmp / "eval.jsonl"
+        rows = [
+            self._row(e, f"k{i}", "ops", f"2026-08-17T1{i}:00:00+00:00")
+            for i, e in enumerate(order)
+        ]
+        log.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+        (tmp / "model-identity.toml").write_text(registry_text, encoding="utf-8")
+        return build_models_api_payload(
+            log_path=log, db_path=tmp / "none.db",
+            catalog_path=tmp / "catalog.json",
+            registry_path=tmp / "model-identity.toml",
+            notes_path=tmp / "notes.md",
+        )
+
+    def _with_entries(self, alpha: str, beta: str) -> str:
+        """REGISTRY with extra TOML lines injected into alpha's / beta's m/one."""
+        reg = self.REGISTRY.replace(
+            '[engines.alpha.models."m/one"]\n',
+            '[engines.alpha.models."m/one"]\n' + alpha,
+        )
+        return reg.replace(
+            '[engines.beta.models."m/one"]\n',
+            '[engines.beta.models."m/one"]\n' + beta,
+        )
+
+    def test_last_verified_does_not_depend_on_row_order(self) -> None:
+        # BOTH members dated, distinct, so "newest" is distinguishable from
+        # "oldest" and from "first seen".
+        reg = self._with_entries(
+            'last_verified = "2026-07-10"\n', 'last_verified = "2026-09-20"\n'
+        )
+        results = []
+        for order in (("alpha", "beta"), ("beta", "alpha")):
+            payload = self._payload_for(reg, order)
+            results.append(
+                [r["last_verified"] for r in payload["rollup"] if r["access"] == "Free tier"]
+            )
+        self.assertEqual(results[0], results[1])
+        self.assertEqual(["2026-09-20"], results[0])
+
+    def test_badge_confidence_and_date_come_from_one_registry_entry(self) -> None:
+        # The reviewer's repro: `alpha` verified on 2026-07-01, `beta`
+        # unverified on 2026-10-08. The only TRUE claims are "verified
+        # 2026-07-01" or "unverified * checked 2026-10-08"; "verified
+        # 2026-10-08" is true of no entry. Rule: newest entry wins, so the
+        # badge must read the unverified one - in BOTH log orders.
+        reg = self._with_entries(
+            'confidence = "verified"\nlast_verified = "2026-07-01"\n',
+            'confidence = "unverified"\nlast_verified = "2026-10-08"\n',
+        )
+        for order in (("alpha", "beta"), ("beta", "alpha")):
+            with self.subTest(order=order):
+                payload = self._payload_for(reg, order)
+                row = next(r for r in payload["rollup"] if r["access"] == "Free tier")
+                html = render_model_table_pair(
+                    row, notes_sections={}, notes_path=Path("notes.md")
+                )
+                self.assertIn("unverified · checked 2026-10-08", html)
+                self.assertNotIn('class="verified-date">verified', html)
+                self.assertNotIn("verified 2026-07-01", html)
+
+    def test_equal_dates_prefer_the_stronger_confidence(self) -> None:
+        reg = self._with_entries(
+            # "zzz-unchecked" sorts AFTER "verified" as text, so only the
+            # explicit strength rank - not string order - can make this pass.
+            'confidence = "zzz-unchecked"\nlast_verified = "2026-10-08"\n',
+            'confidence = "verified"\nlast_verified = "2026-10-08"\n',
+        )
+        for order in (("alpha", "beta"), ("beta", "alpha")):
+            with self.subTest(order=order):
+                payload = self._payload_for(reg, order)
+                row = next(r for r in payload["rollup"] if r["access"] == "Free tier")
+                self.assertEqual("verified", row["confidence"])
+                self.assertEqual("2026-10-08", row["last_verified"])
+
+    def test_enrich_uses_the_aggregators_grouping_key_not_its_own_registry(self) -> None:
+        # The mixed shape (aggregate WITHOUT a registry, enrich WITH one), as
+        # tests/test_taxonomy.py does: the aggregator kept alpha and beta as
+        # two rows, so they must not be handed one shared display_bucket_id.
+        tmp_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        tmp = tmp_dir / "model-identity.toml"
+        tmp.write_text(self.REGISTRY, encoding="utf-8")
+        registry = load_model_identity_registry(tmp)
+        rows = [
+            self._row("alpha", "a1", "ops", "2026-08-17T10:00:00+00:00"),
+            self._row("beta", "b1", "ops", "2026-08-17T11:00:00+00:00"),
+        ]
+        rollup = enrich_model_groups_with_identity(
+            aggregate_model_scoreboard_rows(rows),
+            rows,
+            registry,
+            include_task_type=False,
+        )
+        self.assertEqual(2, len(rollup))
+        ids = [r["display_bucket_id"] for r in rollup]
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertTrue(all("_bucket_identity" not in r for r in rollup))
+
+
+class RealRegistryMergeAgreementTests(unittest.TestCase):
+    """Entries that merge into one scoreboard identity must agree on every
+    per-entry field `enrich_model_groups_with_identity` still takes from the
+    first-seen member (alias, misrouted, unregistered, identity_key,
+    canonical_route), plus `confidence`. A merged row can only make one claim,
+    and "unverified" means "not yet researched", not "failed"
+    (registry/model-identity.toml:6-7) - so a verification belongs on every
+    member of the group, and this test fails until each one carries it.
+    `confidence` is reconciled with `last_verified` at runtime (see
+    MergedIdentityBucketTests), but it must still agree here so the registry
+    itself makes the same claim for every member. The other fields are not
+    reconciled, so a divergence would make a merged row depend on log order.
+    Fail loudly instead.
+    """
+
+    FIELDS = (
+        "alias",
+        "misrouted",
+        "unregistered",
+        "identity_key",
+        "canonical_route",
+        "confidence",
+    )
+
+    def test_merged_members_agree_on_first_seen_fields(self) -> None:
+        registry = load_model_identity_registry(default_model_registry_path())
+        members = set(registry.identities) | set(registry.noncanonical_routes)
+        by_identity: dict[tuple, list[tuple[str, str]]] = {}
+        for engine, model in sorted(members):
+            by_identity.setdefault(
+                model_group_identity_key(engine, model, registry), []
+            ).append((engine, model))
+        merged = {k: v for k, v in by_identity.items() if len(v) > 1}
+        self.assertTrue(merged, "the real registry has no merged identities to check")
+        for identity, group in merged.items():
+            fields = [
+                {
+                    f: row_identity_fields(
+                        {"worker_engine": e, "model": m}, registry
+                    )[f]
+                    for f in self.FIELDS
+                }
+                for e, m in group
+            ]
+            for other, (e, m) in zip(fields[1:], group[1:]):
+                with self.subTest(identity=identity, member=(e, m)):
+                    detail = "\n".join(
+                        f"  {f}: "
+                        + "; ".join(
+                            f"{ge}/{gm}={gf[f]!r}"
+                            for (ge, gm), gf in zip(group, fields)
+                        )
+                        for f in self.FIELDS
+                        if fields[0][f] != other[f]
+                    )
+                    self.assertEqual(
+                        fields[0], other,
+                        f"{len(group)} registry entries merge into one row but "
+                        f"disagree; a verification belongs on EVERY member, so "
+                        f"promote all of them. Full group, per disagreeing "
+                        f"field:\n{detail}",
+                    )
 
 
 if __name__ == "__main__":
