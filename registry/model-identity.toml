@@ -127,12 +127,14 @@ last_verified = 2026-07-10
 #   cline-qwen-local-256k  qwen38-gsqrco-iq3-256k, same GPUs, 256k ctx, unmetered
 #   cline-muse-local  muse-glimmer-agent-256k on the same GPUs (llama.cpp/llama-swap), unmetered
 #
-# Access values are operator-confirmed: the first three 2026-08-18, the qwen
-# cloud route 2026-08-20.
+# Access values are operator-confirmed: the claude, cline, cline-free and
+# cline-glm routes 2026-08-18 (the cline-pass-* keys inherit the `cline` pass
+# route; same prepaid balance), the qwen cloud route 2026-08-20.
 #
-# THE CONFIDENCE SPLIT IS NOT ARBITRARY. The three metered slugs are NOT marked
-# verified - no lab source has been checked for them, and the taxonomy forbids
-# promoting a slug-derived identity without one. The LOCAL model families ARE
+# THE CONFIDENCE SPLIT IS NOT ARBITRARY. The metered slugs (the Cline Pass,
+# free-tier and cloud routes) are NOT marked verified - no lab source has been
+# checked for them, and the taxonomy forbids promoting a slug-derived identity
+# without one. The LOCAL model families ARE
 # verified: cline-qwen-local's and cline-muse-local's older eras because their
 # GGUF weights were probed on the box against an Ollama tag for parent model
 # and manifest; cline-qwen-local's 2026-08-30 era (qwen38-gsqrco-iq3-96k) and
@@ -247,9 +249,13 @@ last_verified = 2026-09-19
 # The three Cline Pass lanes (open-engine#97). Same Cline CLI (`-P cline-pass`)
 # and the same prepaid ClinePass balance, so harness and access match the
 # retired `cline` key; the model row is what tells them apart. Slugs are the
-# `model_default` in open-engine's config/ringer-config.toml. Only
-# deepseek-v4.1-flash has been live-probed by ringer (under `cline`); the other
-# two are unverified.
+# `model_default` in open-engine's config/ringer-config.toml. All three slugs
+# were live-probed: deepseek-v4.1-flash 2026-09-19 (under `cline`), and glm-5.3
+# and deepseek-v4-pro 2026-10-08 in open-engine (isolated CLINE_DATA_DIR; both
+# answered, the session store recorded exactly those ids, and a bogus
+# cline-pass/deepseek-v9-bogus returned `error: model not found` as negative
+# control). A probe proves the slug resolves, not the lab's own model page, so
+# all three stay confidence = "unverified".
 [engines.cline-pass-deepseek41flash]
 harness = "Cline CLI"
 access = "Cline Pass"
@@ -262,6 +268,20 @@ confidence = "unverified"   # slug-derived; DeepSeek's own model page has not be
 source = "live probe 2026-09-19 under the retired `cline` key: cline.exe -P cline-pass -m cline-pass/deepseek-v4.1-flash resolves; open-engine#97 config model_default"
 last_verified = 2026-10-08
 
+[engines.cline-pass-deepseek41flash.models."deepseek/deepseek-v4.1-flash"]
+# FORCED FREE ROUTE, same override as [engines.cline.models."deepseek/deepseek-v4.1-flash"].
+# This key uses the same `-P cline-pass {model_args}` template, and the bare
+# slug takes the free route under the pass provider flag (probe 2026-09-19 was
+# run under `cline`; the mechanism is the provider flag + slug, not the engine
+# key, but it was not re-probed under this key). A run that pins it here
+# spends free-tier quota, not the pass balance.
+display = "DeepSeek V4.1 Flash"
+lab = "DeepSeek"
+access = "Cline free tier"
+confidence = "unverified"
+source = "live probe 2026-09-19 under the retired `cline` key: cline.exe -P cline-pass -m deepseek/deepseek-v4.1-flash resolves to the free route; not re-probed under cline-pass-deepseek41flash, which shares the template"
+last_verified = 2026-10-09
+
 [engines.cline-pass-glm53]
 harness = "Cline CLI"
 access = "Cline Pass"
@@ -270,9 +290,23 @@ default_model_key = "cline-pass/glm-5.3"
 [engines.cline-pass-glm53.models."cline-pass/glm-5.3"]
 display = "GLM 5.3"
 lab = "Z.ai (Zhipu AI)"
-confidence = "unverified"   # not live-probed by ringer; slug taken from the open-engine config
-source = "open-engine#97 config/ringer-config.toml model_default = cline-pass/glm-5.3 (not live-probed)"
+confidence = "unverified"   # slug probed live, but the lab's own model page has not been checked
+source = "live probe 2026-10-08 (open-engine config/ringer-config.toml, isolated CLINE_DATA_DIR): cline.exe --auto-approve true -P cline-pass -m cline-pass/glm-5.3 answered and the session store recorded that exact id; negative control cline-pass/deepseek-v9-bogus returned `error: model not found`"
 last_verified = 2026-10-08
+
+[engines.cline-pass-glm53.models."deepseek/deepseek-v4.1-flash"]
+# FORCED FREE ROUTE, same override as [engines.cline.models."deepseek/deepseek-v4.1-flash"].
+# This key uses the same `-P cline-pass {model_args}` template, and the bare
+# slug takes the free route under the pass provider flag (probe 2026-09-19 was
+# run under `cline`; the mechanism is the provider flag + slug, not the engine
+# key, but it was not re-probed under this key). A run that pins it here
+# spends free-tier quota, not the pass balance.
+display = "DeepSeek V4.1 Flash"
+lab = "DeepSeek"
+access = "Cline free tier"
+confidence = "unverified"
+source = "live probe 2026-09-19 under the retired `cline` key: cline.exe -P cline-pass -m deepseek/deepseek-v4.1-flash resolves to the free route; not re-probed under cline-pass-glm53, which shares the template"
+last_verified = 2026-10-09
 
 [engines.cline-pass-ds4pro]
 harness = "Cline CLI"
@@ -282,9 +316,23 @@ default_model_key = "cline-pass/deepseek-v4-pro"
 [engines.cline-pass-ds4pro.models."cline-pass/deepseek-v4-pro"]
 display = "DeepSeek V4 Pro"
 lab = "DeepSeek"
-confidence = "unverified"   # not live-probed by ringer; slug taken from the open-engine config
-source = "open-engine#97 config/ringer-config.toml model_default = cline-pass/deepseek-v4-pro (not live-probed)"
+confidence = "unverified"   # slug probed live, but DeepSeek's own model page has not been checked
+source = "live probe 2026-10-08 (open-engine config/ringer-config.toml, isolated CLINE_DATA_DIR): cline.exe --auto-approve true -P cline-pass -m cline-pass/deepseek-v4-pro answered and the session store recorded that exact id; negative control cline-pass/deepseek-v9-bogus returned `error: model not found`"
 last_verified = 2026-10-08
+
+[engines.cline-pass-ds4pro.models."deepseek/deepseek-v4.1-flash"]
+# FORCED FREE ROUTE, same override as [engines.cline.models."deepseek/deepseek-v4.1-flash"].
+# This key uses the same `-P cline-pass {model_args}` template, and the bare
+# slug takes the free route under the pass provider flag (probe 2026-09-19 was
+# run under `cline`; the mechanism is the provider flag + slug, not the engine
+# key, but it was not re-probed under this key). A run that pins it here
+# spends free-tier quota, not the pass balance.
+display = "DeepSeek V4.1 Flash"
+lab = "DeepSeek"
+access = "Cline free tier"
+confidence = "unverified"
+source = "live probe 2026-09-19 under the retired `cline` key: cline.exe -P cline-pass -m deepseek/deepseek-v4.1-flash resolves to the free route; not re-probed under cline-pass-ds4pro, which shares the template"
+last_verified = 2026-10-09
 
 [engines.cline-free]
 harness = "Cline CLI"
