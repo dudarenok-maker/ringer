@@ -100,11 +100,13 @@ source = "manifest model field; OpenRouter slug meta-llama/llama-3.3-70b-instruc
 last_verified = 2026-07-10
 
 # ---------------------------------------------------------------------------
-# The Open Engine worker lanes on this box. SEVEN engine keys here are the SAME
-# Cline runtime on seven CONCURRENTLY AVAILABLE routes - not a succession,
-# seven live budgets. Harness is identical for all seven, and for the first
-# five (cline through cline-muse-local's cloud/metered siblings) `access` is
-# what tells them apart. THAT BREAKS FOR THE THREE LOCAL LANES: they all run
+# The Open Engine worker lanes on this box. NINE live engine keys here are the
+# SAME Cline runtime on nine CONCURRENTLY AVAILABLE routes - not a succession
+# (the retired `cline` key is the one succession, kept for its historical
+# rows). Harness is identical for all nine, and for the cloud/metered ones
+# `access` is what tells them apart - EXCEPT the three cline-pass-* lanes,
+# which share one prepaid balance and so one `access` ("Cline Pass"); only
+# their model row distinguishes them. THAT ALSO HOLDS FOR THE THREE LOCAL LANES: they all run
 # on this box's own GPUs, so cline-qwen-local, cline-qwen-local-256k and
 # cline-muse-local share the identical `access` string
 # ("Local (llama.cpp/llama-swap, unmetered)") as well as harness - among
@@ -113,7 +115,10 @@ last_verified = 2026-07-10
 # budget) actually distinguishes them. Do not read three local rows with
 # matching access as a bug; the model column is the discriminator there.
 #
-#   cline             Cline Pass, prepaid balance
+#   cline             RETIRED 2026-10-08 (open-engine#97); historical rows only. Was Cline Pass, prepaid balance
+#   cline-pass-deepseek41flash  Cline Pass, prepaid balance (successor to `cline`)
+#   cline-pass-glm53            glm-5.3 on the same Cline Pass balance
+#   cline-pass-ds4pro           deepseek-v4-pro on the same Cline Pass balance
 #   cline-free        Cline free tier, hard daily quota
 #   cline-glm         glm-5.2 on BytePlus ARK, Lite package
 #   cline-qwen-cloud  qwen3.8-flash on the operator's Alibaba MaaS token plan
@@ -175,6 +180,12 @@ confidence = "verified"     # pinned on the command line via --model, so the rec
 source = "~/.config/ringer/config.toml [engines.claude] args_template"
 last_verified = 2026-08-18
 
+# RETIRED 2026-10-08 (open-engine#97): the lane/engine key `cline` was renamed
+# `cline-pass-deepseek41flash` (see the three cline-pass-* tables below). No
+# new run logs under this key, but the ringer DB still holds historical
+# `cline` attempt rows, so every era here stays - same append-only reasoning
+# as the rest of this file. Both keys resolve cline-pass/deepseek-v4.1-flash to
+# the same display/lab/harness/access, so the scoreboard groups them as one row.
 [engines.cline]
 harness = "Cline CLI"
 access = "Cline Pass"            # operator-confirmed 2026-08-18; prepaid balance
@@ -232,6 +243,48 @@ access = "Cline free tier"
 confidence = "unverified"
 source = "live probe 2026-09-19: cline.exe -P cline-pass -m deepseek/deepseek-v4.1-flash resolves - i.e. the bare slug still forces the free route even under the PASS provider flag, same as era 1's entry proved for the old id; this entry exists to keep that forced-free-route run attributed correctly if it is ever logged under the `cline` engine key instead of `cline-free`"
 last_verified = 2026-09-19
+
+# The three Cline Pass lanes (open-engine#97). Same Cline CLI (`-P cline-pass`)
+# and the same prepaid ClinePass balance, so harness and access match the
+# retired `cline` key; the model row is what tells them apart. Slugs are the
+# `model_default` in open-engine's config/ringer-config.toml. Only
+# deepseek-v4.1-flash has been live-probed by ringer (under `cline`); the other
+# two are unverified.
+[engines.cline-pass-deepseek41flash]
+harness = "Cline CLI"
+access = "Cline Pass"
+default_model_key = "cline-pass/deepseek-v4.1-flash"
+
+[engines.cline-pass-deepseek41flash.models."cline-pass/deepseek-v4.1-flash"]
+display = "DeepSeek V4.1 Flash"
+lab = "DeepSeek"
+confidence = "unverified"   # slug-derived; DeepSeek's own model page has not been checked
+source = "live probe 2026-09-19 under the retired `cline` key: cline.exe -P cline-pass -m cline-pass/deepseek-v4.1-flash resolves; open-engine#97 config model_default"
+last_verified = 2026-10-08
+
+[engines.cline-pass-glm53]
+harness = "Cline CLI"
+access = "Cline Pass"
+default_model_key = "cline-pass/glm-5.3"
+
+[engines.cline-pass-glm53.models."cline-pass/glm-5.3"]
+display = "GLM 5.3"
+lab = "Z.ai (Zhipu AI)"
+confidence = "unverified"   # not live-probed by ringer; slug taken from the open-engine config
+source = "open-engine#97 config/ringer-config.toml model_default = cline-pass/glm-5.3 (not live-probed)"
+last_verified = 2026-10-08
+
+[engines.cline-pass-ds4pro]
+harness = "Cline CLI"
+access = "Cline Pass"
+default_model_key = "cline-pass/deepseek-v4-pro"
+
+[engines.cline-pass-ds4pro.models."cline-pass/deepseek-v4-pro"]
+display = "DeepSeek V4 Pro"
+lab = "DeepSeek"
+confidence = "unverified"   # not live-probed by ringer; slug taken from the open-engine config
+source = "open-engine#97 config/ringer-config.toml model_default = cline-pass/deepseek-v4-pro (not live-probed)"
+last_verified = 2026-10-08
 
 [engines.cline-free]
 harness = "Cline CLI"

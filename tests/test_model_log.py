@@ -26,6 +26,7 @@ from ringer import (  # noqa: E402
     aggregate_model_scoreboard_rows,
     default_model_registry_path,
     load_model_identity_registry,
+    model_group_identity_key,
     model_log_row_counts_toward_score,
     model_log_row_is_retry,
     read_model_log_rows,
@@ -539,6 +540,40 @@ class RealRegistryDefaultsTests(unittest.TestCase):
             "side falling back to an unregistered/Cline-Pass identity",
         )
         self.assertEqual(free_tier_groups[0]["tasks"], 2)
+
+    def test_the_three_cline_pass_lane_keys_resolve_registered(self) -> None:
+        # open-engine#97 split the single `cline` key into three lanes on the
+        # same prepaid ClinePass. A key with no [engines.<key>] table resolves
+        # through the "unregistered model slug" fallback: lab "(unverified)",
+        # harness = the raw engine key, access "unknown".
+        registry = self._real_registry()
+        for engine, slug in (
+            ("cline-pass-deepseek41flash", "cline-pass/deepseek-v4.1-flash"),
+            ("cline-pass-glm53", "cline-pass/glm-5.3"),
+            ("cline-pass-ds4pro", "cline-pass/deepseek-v4-pro"),
+        ):
+            with self.subTest(engine=engine):
+                self.assertEqual(registry.defaults.get(engine), slug)
+                identity = registry.resolve(engine, slug)
+                self.assertFalse(identity.unregistered)
+                self.assertEqual(identity.harness, "Cline CLI")
+                self.assertEqual(identity.access, "Cline Pass")
+
+    def test_retired_cline_key_and_its_successor_share_one_scoreboard_row(
+        self,
+    ) -> None:
+        # The retired `cline` key's historical rows and the successor lane run
+        # the same model on the same route, so model_group_identity_key (which
+        # keys on the RESOLVED identity) must give them one group.
+        registry = self._real_registry()
+        slug = "cline-pass/deepseek-v4.1-flash"
+        self.assertEqual(
+            model_group_identity_key("cline", slug, registry),
+            model_group_identity_key("cline-pass-deepseek41flash", slug, registry),
+        )
+        self.assertFalse(
+            registry.resolve("cline-pass-deepseek41flash", slug).unregistered
+        )
 
 
 if __name__ == "__main__":
