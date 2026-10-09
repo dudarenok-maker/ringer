@@ -26,6 +26,7 @@ from ringer import (  # noqa: E402
     aggregate_model_scoreboard_rows,
     default_model_registry_path,
     load_model_identity_registry,
+    model_group_identity_key,
     model_log_row_counts_toward_score,
     model_log_row_is_retry,
     read_model_log_rows,
@@ -539,6 +540,133 @@ class RealRegistryDefaultsTests(unittest.TestCase):
             "side falling back to an unregistered/Cline-Pass identity",
         )
         self.assertEqual(free_tier_groups[0]["tasks"], 2)
+
+    def test_a_forced_free_route_run_attributes_to_free_tier_under_every_pass_key(
+        self,
+    ) -> None:
+        # The three pass keys share the `cline` key's `-P cline-pass
+        # {model_args}` template, and the forced-free-route is a property of
+        # that provider flag (probe 2026-09-19), not of the engine key. Each
+        # needs the same override or a bare-slug run is credited to the pass.
+        #
+        # Keys are DERIVED from the registry (every engine on the prepaid
+        # pass), so a fourth pass lane registered without the override fails
+        # here instead of silently crediting a free-route run to the pass.
+        # The merge assertion also catches an override whose display/lab was
+        # copied from the lane row above it.
+        registry = self._real_registry()
+        slug = "deepseek/deepseek-v4.1-flash"
+        pass_engines = [
+            e for e, m in registry.engine_meta.items() if m.access == "Cline Pass"
+        ]
+        for expected in (
+            "cline",
+            "cline-pass-deepseek41flash",
+            "cline-pass-glm53",
+            "cline-pass-ds4pro",
+        ):
+            self.assertIn(expected, pass_engines)
+        free_key = model_group_identity_key("cline-free", slug, registry)
+        for engine in pass_engines:
+            with self.subTest(engine=engine):
+                identity = registry.resolve(engine, slug)
+                self.assertFalse(identity.unregistered)
+                self.assertEqual(identity.access, "Cline free tier")
+                self.assertEqual(
+                    model_group_identity_key(engine, slug, registry), free_key
+                )
+
+    def test_the_three_cline_pass_lane_keys_resolve_registered(self) -> None:
+        # open-engine#97 split the single `cline` key into three lanes on the
+        # same prepaid ClinePass. A key with no [engines.<key>] table resolves
+        # through the "unregistered model slug" fallback: lab "(unverified)",
+        # harness = the raw engine key, access "unknown".
+        registry = self._real_registry()
+        for engine, slug in (
+            ("cline-pass-deepseek41flash", "cline-pass/deepseek-v4.1-flash"),
+            ("cline-pass-glm53", "cline-pass/glm-5.3"),
+            ("cline-pass-ds4pro", "cline-pass/deepseek-v4-pro"),
+        ):
+            with self.subTest(engine=engine):
+                self.assertEqual(registry.defaults.get(engine), slug)
+                identity = registry.resolve(engine, slug)
+                self.assertFalse(identity.unregistered)
+                self.assertEqual(identity.harness, "Cline CLI")
+                self.assertEqual(identity.access, "Cline Pass")
+
+    def test_the_three_cline_pass_lane_keys_carry_their_own_model_row(self) -> None:
+        # The header calls the model row the ONLY discriminator between these
+        # keys (harness and access match), so a copy-pasted display or lab
+        # would silently merge two lanes into one scoreboard row.
+        registry = self._real_registry()
+        expected = {
+            "cline-pass-deepseek41flash": (
+                "cline-pass/deepseek-v4.1-flash", "DeepSeek V4.1 Flash", "DeepSeek",
+            ),
+            "cline-pass-glm53": ("cline-pass/glm-5.3", "GLM 5.3", "Z.ai (Zhipu AI)"),
+            "cline-pass-ds4pro": (
+                "cline-pass/deepseek-v4-pro", "DeepSeek V4 Pro", "DeepSeek",
+            ),
+        }
+        for engine, (slug, display, lab) in expected.items():
+            with self.subTest(engine=engine):
+                identity = registry.resolve(engine, slug)
+                self.assertEqual(identity.model_display, display)
+                self.assertEqual(identity.lab, lab)
+        keys = {
+            model_group_identity_key(engine, slug, registry)
+            for engine, (slug, _d, _l) in expected.items()
+        }
+        self.assertEqual(len(keys), 3)
+
+    def test_pass_lane_rows_land_in_their_own_named_scoreboard_rows(self) -> None:
+        registry = self._real_registry()
+        lanes = (
+            ("cline-pass-deepseek41flash", "cline-pass/deepseek-v4.1-flash"),
+            ("cline-pass-glm53", "cline-pass/glm-5.3"),
+            ("cline-pass-ds4pro", "cline-pass/deepseek-v4-pro"),
+            # the retired key folds into its successor's row
+            ("cline", "cline-pass/deepseek-v4.1-flash"),
+        )
+        rows = [
+            {
+                "worker_engine": engine,
+                "model": slug,
+                "task_type": "ops",
+                "run_id": f"r{i}",
+                "task_key": f"r{i}",
+                "verdict": "PASS",
+                "duration_ms": 1000,
+                "worker_tokens": 100,
+                "logged_at": "2026-10-09T10:00:00+00:00",
+            }
+            for i, (engine, slug) in enumerate(lanes)
+        ]
+        rolled = aggregate_model_scoreboard_rows(rows, registry=registry)
+        by_display = {
+            registry.resolve(g["engine"], g["model"]).model_display: g["tasks"]
+            for g in rolled
+        }
+        self.assertEqual(
+            by_display,
+            {"DeepSeek V4.1 Flash": 2, "GLM 5.3": 1, "DeepSeek V4 Pro": 1},
+        )
+
+    def test_retired_cline_key_and_its_successor_share_one_scoreboard_row(
+        self,
+    ) -> None:
+        # The retired `cline` key's historical rows and the successor lane run
+        # the same model on the same route, so model_group_identity_key (which
+        # keys on the RESOLVED identity) must give them one group.
+        registry = self._real_registry()
+        slug = "cline-pass/deepseek-v4.1-flash"
+        self.assertEqual(
+            model_group_identity_key("cline", slug, registry),
+            model_group_identity_key("cline-pass-deepseek41flash", slug, registry),
+        )
+        self.assertFalse(
+            registry.resolve("cline-pass-deepseek41flash", slug).unregistered
+        )
 
 
 if __name__ == "__main__":

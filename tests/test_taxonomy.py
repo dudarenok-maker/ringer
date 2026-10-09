@@ -213,8 +213,9 @@ source = "fixture"
         self.assertEqual("(unverified)", registry.resolve("custom", "model").lab)
 
     def test_a_model_may_override_its_engines_access_route(self) -> None:
-        # ONE ENGINE KEY, TWO BILLING ROUTES. The live case is `cline`, which
-        # serves the prepaid pass but still carries rows from when the free
+        # ONE ENGINE KEY, TWO BILLING ROUTES. The live case is `cline` (retired
+        # 2026-10-08; the cline-pass-* keys carry the same override), which
+        # served the prepaid pass but still carries rows from when the free
         # daily-quota route ran under the same key. Access hung off the engine
         # alone, so those rows were labelled as pass spend - the API/Plan column
         # stating the opposite of what they cost, with nothing else in the row
