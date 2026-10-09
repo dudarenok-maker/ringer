@@ -7023,6 +7023,7 @@ def aggregate_model_log_rows(
                     unattributed,
                 ) in effort_keys,
                 "unattributed": unattributed,
+                "_bucket_identity": model_group_identity_key(group_engine, group_model, registry),
                 "tasks": 0,
                 "attempts": 0,
                 "passed": 0,
@@ -7114,6 +7115,7 @@ def aggregate_model_log_rows(
                 "reasoning_effort": group["reasoning_effort"],
                 "show_reasoning_effort": group["show_reasoning_effort"],
                 "unattributed": group["unattributed"],
+                "_bucket_identity": group["_bucket_identity"],
                 "tasks": group["tasks"],
                 "attempts": group["attempts"],
                 "passed": group["passed"],
@@ -7464,10 +7466,14 @@ def enrich_model_groups_with_identity(
     identity_rows: dict[tuple[Any, ...], dict[str, Any]] = {}
     latest: dict[tuple[Any, ...], str] = {}
     # A merged identity row spans several raw engines whose registry entries
-    # may carry different `last_verified` dates. Rule: the merged row shows the
-    # NEWEST date among them (ISO dates compare as text), never the first
-    # engine's - so the label does not depend on log order.
-    verified_by_identity: dict[tuple[Any, ...], str] = {}
+    # may carry different `last_verified` dates AND different `confidence`.
+    # The two are ONE CLAIM on the scoreboard ("verified <date>" vs
+    # "unverified · checked <date>"), so they are taken TOGETHER from a single
+    # registry entry, never one from each. Rule: the entry with the NEWEST
+    # `last_verified` (ISO dates compare as text); on a date tie, the stronger
+    # confidence ("verified" outranks anything else), then the confidence text
+    # itself so the pick is deterministic. Independent of log order.
+    verified_by_identity: dict[tuple[Any, ...], tuple[str, int, str]] = {}
     for row in task_final_rows(rows):
         if model_log_row_is_reserved_fixture(row):
             continue
@@ -7492,10 +7498,15 @@ def enrich_model_groups_with_identity(
                 )
             identity_rows[key] = identity
         if not unattributed:
-            verified = registry.resolve(group_engine, group_model).last_verified
+            resolved = registry.resolve(group_engine, group_model)
             ikey = (*model_group_identity_key(group_engine, group_model, registry), key[2:])
-            if verified > verified_by_identity.get(ikey, ""):
-                verified_by_identity[ikey] = verified
+            candidate = (
+                resolved.last_verified,
+                1 if resolved.confidence == "verified" else 0,
+                resolved.confidence,
+            )
+            if candidate > verified_by_identity.get(ikey, ("", -1, "")):
+                verified_by_identity[ikey] = candidate
     enriched: list[dict[str, Any]] = []
     for group in groups:
         key = (
@@ -7541,13 +7552,23 @@ def enrich_model_groups_with_identity(
                     (str(group.get("task_type") or ""),) if include_task_type else ()
                 ) + (group.get("reasoning_effort"), False),
             )
-            item["last_verified"] = verified_by_identity.get(ikey, item.get("last_verified", ""))
+            best = verified_by_identity.get(ikey)
+            if best is not None:
+                item["last_verified"], _rank, item["confidence"] = best
         # bucket_id comes from the RESOLVED identity, the same key the
         # aggregators group on - not the first-seen raw engine, which differs
         # between the rollup and each task-type grouping once two engines
-        # merge and orphans the breakdown in Ringside's groupsFor().
-        bucket_identity = model_group_identity_key(
-            str(group.get("engine") or ""), str(group.get("model") or ""), registry
+        # merge and orphans the breakdown in Ringside's groupsFor(). The
+        # aggregators carry that exact key on the group; recomputing it here
+        # against THIS call's registry is only the fallback for a legacy
+        # caller whose groups lack it.
+        carried = item.pop("_bucket_identity", None)
+        bucket_identity = (
+            tuple(carried)
+            if carried is not None
+            else model_group_identity_key(
+                str(group.get("engine") or ""), str(group.get("model") or ""), registry
+            )
         )
         if item.get("unregistered") and str(item.get("model") or "").startswith("openrouter/"):
             if item.get("model_display") == item.get("model"):
@@ -8580,6 +8601,7 @@ def aggregate_model_scoreboard_rows(
                     unattributed,
                 ) in effort_keys,
                 "unattributed": unattributed,
+                "_bucket_identity": model_group_identity_key(group_engine, group_model, registry),
                 "tasks": 0,
                 "attempts": 0,
                 "passed": 0,
@@ -8689,6 +8711,7 @@ def aggregate_model_scoreboard_rows(
                 "reasoning_effort": entry["reasoning_effort"],
                 "show_reasoning_effort": entry["show_reasoning_effort"],
                 "unattributed": entry["unattributed"],
+                "_bucket_identity": entry["_bucket_identity"],
                 "tier": tier,
                 "tasks": tasks_count,
                 "attempts": entry["attempts"],

@@ -31,6 +31,9 @@ from ringer import (  # noqa: E402
     model_log_row_counts_toward_score,
     model_log_row_is_retry,
     read_model_log_rows,
+    render_model_table_pair,
+    row_identity_fields,
+    enrich_model_groups_with_identity,
 )
 
 LONG_SPEC = (
@@ -772,32 +775,143 @@ class MergedIdentityBucketTests(unittest.TestCase):
         self.assertEqual(flags[0], flags[1])
         self.assertEqual({True}, flags[0])
 
-    def test_last_verified_does_not_depend_on_row_order(self) -> None:
+    def _payload_for(self, registry_text, order, rows_fn=None):
+        tmp = Path(tempfile.mkdtemp())
+        log = tmp / "eval.jsonl"
+        rows = [
+            self._row(e, f"k{i}", "ops", f"2026-08-17T1{i}:00:00+00:00")
+            for i, e in enumerate(order)
+        ]
+        log.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+        (tmp / "model-identity.toml").write_text(registry_text, encoding="utf-8")
+        return build_models_api_payload(
+            log_path=log, db_path=tmp / "none.db",
+            catalog_path=tmp / "catalog.json",
+            registry_path=tmp / "model-identity.toml",
+            notes_path=tmp / "notes.md",
+        )
+
+    def _with_entries(self, alpha: str, beta: str) -> str:
+        """REGISTRY with extra TOML lines injected into alpha's / beta's m/one."""
         reg = self.REGISTRY.replace(
+            '[engines.alpha.models."m/one"]\n',
+            '[engines.alpha.models."m/one"]\n' + alpha,
+        )
+        return reg.replace(
             '[engines.beta.models."m/one"]\n',
-            '[engines.beta.models."m/one"]\nlast_verified = "2026-07-10"\n',
+            '[engines.beta.models."m/one"]\n' + beta,
+        )
+
+    def test_last_verified_does_not_depend_on_row_order(self) -> None:
+        # BOTH members dated, distinct, so "newest" is distinguishable from
+        # "oldest" and from "first seen".
+        reg = self._with_entries(
+            'last_verified = "2026-07-10"\n', 'last_verified = "2026-09-20"\n'
         )
         results = []
         for order in (("alpha", "beta"), ("beta", "alpha")):
-            tmp = Path(tempfile.mkdtemp())
-            log = tmp / "eval.jsonl"
-            rows = [
-                self._row(e, f"k{i}", "ops", f"2026-08-17T1{i}:00:00+00:00")
-                for i, e in enumerate(order)
-            ]
-            log.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
-            (tmp / "model-identity.toml").write_text(reg, encoding="utf-8")
-            payload = build_models_api_payload(
-                log_path=log, db_path=tmp / "none.db",
-                catalog_path=tmp / "catalog.json",
-                registry_path=tmp / "model-identity.toml",
-                notes_path=tmp / "notes.md",
-            )
+            payload = self._payload_for(reg, order)
             results.append(
                 [r["last_verified"] for r in payload["rollup"] if r["access"] == "Free tier"]
             )
         self.assertEqual(results[0], results[1])
-        self.assertEqual(["2026-07-10"], results[0])
+        self.assertEqual(["2026-09-20"], results[0])
+
+    def test_badge_confidence_and_date_come_from_one_registry_entry(self) -> None:
+        # The reviewer's repro: `alpha` verified on 2026-07-01, `beta`
+        # unverified on 2026-10-08. The only TRUE claims are "verified
+        # 2026-07-01" or "unverified * checked 2026-10-08"; "verified
+        # 2026-10-08" is true of no entry. Rule: newest entry wins, so the
+        # badge must read the unverified one - in BOTH log orders.
+        reg = self._with_entries(
+            'confidence = "verified"\nlast_verified = "2026-07-01"\n',
+            'confidence = "unverified"\nlast_verified = "2026-10-08"\n',
+        )
+        for order in (("alpha", "beta"), ("beta", "alpha")):
+            with self.subTest(order=order):
+                payload = self._payload_for(reg, order)
+                row = next(r for r in payload["rollup"] if r["access"] == "Free tier")
+                html = render_model_table_pair(
+                    row, notes_sections={}, notes_path=Path("notes.md")
+                )
+                self.assertIn("unverified · checked 2026-10-08", html)
+                self.assertNotIn('class="verified-date">verified', html)
+                self.assertNotIn("verified 2026-07-01", html)
+
+    def test_equal_dates_prefer_the_stronger_confidence(self) -> None:
+        reg = self._with_entries(
+            # "zzz-unchecked" sorts AFTER "verified" as text, so only the
+            # explicit strength rank - not string order - can make this pass.
+            'confidence = "zzz-unchecked"\nlast_verified = "2026-10-08"\n',
+            'confidence = "verified"\nlast_verified = "2026-10-08"\n',
+        )
+        for order in (("alpha", "beta"), ("beta", "alpha")):
+            with self.subTest(order=order):
+                payload = self._payload_for(reg, order)
+                row = next(r for r in payload["rollup"] if r["access"] == "Free tier")
+                self.assertEqual("verified", row["confidence"])
+                self.assertEqual("2026-10-08", row["last_verified"])
+
+    def test_enrich_uses_the_aggregators_grouping_key_not_its_own_registry(self) -> None:
+        # The mixed shape (aggregate WITHOUT a registry, enrich WITH one), as
+        # tests/test_taxonomy.py does: the aggregator kept alpha and beta as
+        # two rows, so they must not be handed one shared display_bucket_id.
+        tmp = Path(tempfile.mkdtemp()) / "model-identity.toml"
+        tmp.write_text(self.REGISTRY, encoding="utf-8")
+        registry = load_model_identity_registry(tmp)
+        rows = [
+            self._row("alpha", "a1", "ops", "2026-08-17T10:00:00+00:00"),
+            self._row("beta", "b1", "ops", "2026-08-17T11:00:00+00:00"),
+        ]
+        rollup = enrich_model_groups_with_identity(
+            aggregate_model_scoreboard_rows(rows),
+            rows,
+            registry,
+            include_task_type=False,
+        )
+        self.assertEqual(2, len(rollup))
+        ids = [r["display_bucket_id"] for r in rollup]
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertTrue(all("_bucket_identity" not in r for r in rollup))
+
+
+class RealRegistryMergeAgreementTests(unittest.TestCase):
+    """Entries that merge into one scoreboard identity must agree on every
+    per-entry field `enrich_model_groups_with_identity` still takes from the
+    first-seen member (alias, misrouted, unregistered, identity_key,
+    canonical_route). `confidence`/`last_verified` are reconciled explicitly
+    (see MergedIdentityBucketTests); these are not, so a divergence would make
+    a merged row depend on log order. Fail loudly instead.
+    """
+
+    FIELDS = ("alias", "misrouted", "unregistered", "identity_key", "canonical_route")
+
+    def test_merged_members_agree_on_first_seen_fields(self) -> None:
+        registry = load_model_identity_registry(default_model_registry_path())
+        members = set(registry.identities) | set(registry.noncanonical_routes)
+        by_identity: dict[tuple, list[tuple[str, str]]] = {}
+        for engine, model in sorted(members):
+            by_identity.setdefault(
+                model_group_identity_key(engine, model, registry), []
+            ).append((engine, model))
+        merged = {k: v for k, v in by_identity.items() if len(v) > 1}
+        self.assertTrue(merged, "the real registry has no merged identities to check")
+        for identity, group in merged.items():
+            fields = [
+                {
+                    f: row_identity_fields(
+                        {"worker_engine": e, "model": m}, registry
+                    )[f]
+                    for f in self.FIELDS
+                }
+                for e, m in group
+            ]
+            for other, (e, m) in zip(fields[1:], group[1:]):
+                with self.subTest(identity=identity, member=(e, m)):
+                    self.assertEqual(
+                        fields[0], other,
+                        f"{group[0]} and {(e, m)} merge into one row but disagree",
+                    )
 
 
 if __name__ == "__main__":
