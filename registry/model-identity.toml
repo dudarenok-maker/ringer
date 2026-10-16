@@ -173,7 +173,7 @@ last_verified = 2026-07-10
 [engines.claude]
 harness = "Claude Code"
 access = "Max 20x plan"          # operator-confirmed 2026-08-18
-default_model_key = "claude-sonnet-5"
+default_model_key = "claude-sonnet-5-5"
 
 [engines.claude.models."claude-sonnet-5"]
 display = "Claude Sonnet 5"
@@ -181,6 +181,17 @@ lab = "Anthropic"
 confidence = "verified"     # pinned on the command line via --model, so the recorded slug is true by construction
 source = "~/.config/ringer/config.toml [engines.claude] args_template"
 last_verified = 2026-08-18
+
+[engines.claude.models."claude-sonnet-5-5"]
+# CURRENT (and the default_model_key above). The open-engine claude lane moved
+# from claude-sonnet-5 to claude-sonnet-5-5; the older entry stays for every
+# run logged before the move (append-only). Lane moved 2026-10-10
+# (open-engine#103).
+display = "Claude Sonnet 5.5"
+lab = "Anthropic"
+confidence = "verified"     # same mechanism as claude-sonnet-5: pinned on the command line via --model, so the recorded slug is true by construction
+source = "~/.config/ringer/config.toml [engines.claude] args_template; runs.jsonl rows recording claude-sonnet-5-5"
+last_verified = 2026-10-16
 
 # RETIRED 2026-10-08 (open-engine#97): the lane/engine key `cline` was renamed
 # `cline-pass-deepseek41flash` (see the three cline-pass-* tables below). No
@@ -206,9 +217,12 @@ source = "live probe 2026-08-16: cline.exe -m cline-pass/deepseek-v4-flash resol
 last_verified = 2026-08-18
 
 [engines.cline.models."cline-pass/deepseek-v4.1-flash"]
-# ERA 2 (CURRENT, and the default_model_key above). deepseek-v4-flash ->
-# deepseek-v4.1-flash 2026-09-19: ClinePass deprecated the former effective
-# 2026-09-21 (model-updates notice, received 2026-09-19).
+# ERA 2. SUPERSEDED 2026-10-10 by "cline-free/step-5-preview" below.
+# deepseek-v4-flash -> deepseek-v4.1-flash 2026-09-19: ClinePass deprecated
+# the former effective 2026-09-21 (model-updates notice, received 2026-09-19).
+# Kept for every run logged under this key. NOTE: the ~306 rows from
+# 2026-10-02/03 logged under this key are 0-token Cline Credits errors (Cline
+# moved the model off its free tier) that still display "Cline free tier".
 display = "DeepSeek V4.1 Flash"
 lab = "DeepSeek"
 confidence = "unverified"   # slug-derived; DeepSeek's own model page has not been checked
@@ -337,7 +351,7 @@ last_verified = 2026-09-19
 [engines.cline-free]
 harness = "Cline CLI"
 access = "Cline free tier"       # operator-confirmed 2026-08-18; hard daily quota
-default_model_key = "deepseek/deepseek-v4.1-flash"
+default_model_key = "cline-free/step-5-preview"
 
 [engines.cline-free.models."deepseek/deepseek-v4-flash"]
 # ERA 1. SUPERSEDED 2026-09-19 by "deepseek/deepseek-v4.1-flash" below - kept
@@ -350,14 +364,32 @@ source = "prefixed slug forces the free route; proven 2026-08-15 when it overrod
 last_verified = 2026-08-18
 
 [engines.cline-free.models."deepseek/deepseek-v4.1-flash"]
-# ERA 2 (CURRENT, and the default_model_key above). deepseek-v4-flash ->
-# deepseek-v4.1-flash 2026-09-19: ClinePass deprecated the former effective
-# 2026-09-21 (model-updates notice, received 2026-09-19).
+# ERA 2. SUPERSEDED 2026-10-10 by "cline-free/step-5-preview" below.
+# deepseek-v4-flash -> deepseek-v4.1-flash 2026-09-19: ClinePass deprecated
+# the former effective 2026-09-21 (model-updates notice, received 2026-09-19).
+# Kept for every run logged under this key. NOTE: the ~306 rows from
+# 2026-10-02/03 logged under this key are 0-token Cline Credits errors (Cline
+# moved the model off its free tier) that still display "Cline free tier".
 display = "DeepSeek V4.1 Flash"
 lab = "DeepSeek"
 confidence = "unverified"
 source = "live probe 2026-09-19: cline.exe -P cline -m deepseek/deepseek-v4.1-flash resolves"
 last_verified = 2026-09-19
+
+[engines.cline-free.models."cline-free/step-5-preview"]
+# ERA 3 (the default_model_key above, until a successor is registered). deepseek/deepseek-v4.1-flash
+# -> cline-free/step-5-preview 2026-10-10 (open-engine#102): Cline moved the
+# former off its free tier (it now bills Cline Credits as a paid ClinePass
+# model), so the free lane was repointed at a model still on the free list.
+# RETIRED 2026-10-15: the free promotion for this model ended (every run
+# errors `Free model promotion ended`; evidence: open-engine lane logs,
+# open-engine#106). Kept for every run logged before then (append-only); the
+# successor free model is not yet registered.
+display = "Step 5 Preview"
+lab = "StepFun"
+confidence = "unverified"   # lab per open-engine#102's description; the model card was not independently checked
+source = "open-engine#102 (live probe 2026-10-10: cline -P cline -m cline-free/step-5-preview returned PONG; description names it StepFun Step 5 Preview) and open-engine config/lanes.psd1"
+last_verified = 2026-10-10
 
 [engines.cline-glm]
 harness = "Cline CLI"

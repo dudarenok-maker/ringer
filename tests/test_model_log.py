@@ -659,6 +659,29 @@ class RealRegistryDefaultsTests(unittest.TestCase):
             {"DeepSeek V4.1 Flash": 2, "GLM 5.3": 1, "DeepSeek V4 Pro": 1},
         )
 
+    def test_current_claude_and_cline_free_models_resolve_registered(self) -> None:
+        # The claude lane now runs claude-sonnet-5-5 and cline-free runs
+        # cline-free/step-5-preview (open-engine#102). Unregistered, each
+        # resolved as lab "(unverified)" / confidence "fallback". The defaults
+        # must point at the current keys; the older entries stay (append-only).
+        registry = self._real_registry()
+        for engine, slug, lab, display, access, old_slug in (
+            ("claude", "claude-sonnet-5-5", "Anthropic", "Claude Sonnet 5.5",
+             "Max 20x plan", "claude-sonnet-5"),
+            ("cline-free", "cline-free/step-5-preview", "StepFun",
+             "Step 5 Preview", "Cline free tier",
+             "deepseek/deepseek-v4.1-flash"),
+        ):
+            with self.subTest(engine=engine):
+                self.assertEqual(registry.defaults.get(engine), slug)
+                identity = registry.resolve(engine, slug)
+                self.assertFalse(identity.unregistered)
+                self.assertEqual(identity.lab, lab)
+                self.assertEqual(identity.model_display, display)
+                self.assertEqual(identity.access, access)
+                self.assertNotEqual(identity.confidence, "fallback")
+                self.assertFalse(registry.resolve(engine, old_slug).unregistered)
+
     def test_retired_cline_key_and_its_successor_share_one_scoreboard_row(
         self,
     ) -> None:
@@ -944,10 +967,6 @@ class RealRegistryMergeAgreementTests(unittest.TestCase):
                         f"promote all of them. Full group, per disagreeing "
                         f"field:\n{detail}",
                     )
-
-
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
 
 
 class CountsTowardScoreTests(unittest.TestCase):
@@ -1334,3 +1353,7 @@ class CountsTowardScoreTests(unittest.TestCase):
         # must not claim a pass rate it has no evidence for.
         self.assertEqual(group["passed"], 0)
         self.assertEqual(group["failed"], 0)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
