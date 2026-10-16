@@ -112,6 +112,7 @@ class RingerCliTests(unittest.TestCase):
         env = os.environ.copy()
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         env["RINGER_NO_SELF_UPDATE"] = "1"
+        env["RINGER_NO_HUD"] = "1"
         return subprocess.run(
             cmd,
             cwd=ROOT,
@@ -275,6 +276,7 @@ class RingerCliTests(unittest.TestCase):
         env = os.environ.copy()
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         env["RINGER_NO_SELF_UPDATE"] = "1"
+        env["RINGER_NO_HUD"] = "1"
         proc = subprocess.Popen(
             cmd,
             cwd=ROOT,
@@ -335,6 +337,7 @@ class RingerCliTests(unittest.TestCase):
         env = os.environ.copy()
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         env["RINGER_NO_SELF_UPDATE"] = "1"
+        env["RINGER_NO_HUD"] = "1"
         proc = subprocess.Popen(
             cmd,
             cwd=ROOT,

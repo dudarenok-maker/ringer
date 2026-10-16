@@ -5,6 +5,7 @@ import contextlib
 import io
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -27,6 +28,8 @@ def cli_env(home: Path | None = None) -> dict[str, str]:
     env = os.environ.copy()
     env["RINGER_NO_SELF_UPDATE"] = "1"
     env["RINGER_NO_CATALOG_REFRESH"] = "1"
+    # ask/run auto-start the persistent HUD; tests must never leave one listening.
+    env["RINGER_NO_HUD"] = "1"
     if home is not None:
         env["HOME"] = str(home)
     return env
@@ -224,6 +227,45 @@ class AskCommandTests(unittest.TestCase):
             )
             self.assertIn("one-request", library["artifacts"])
             self.assertFalse((workdir / "packet.txt").exists())
+
+    def test_ask_leaves_no_hud_listening(self) -> None:
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            hud_port = probe.getsockname()[1]
+        with tempfile.TemporaryDirectory() as temp_root:
+            root = Path(temp_root)
+            home = root / "home"
+            worker = root / "worker.py"
+            home.mkdir()
+            worker.write_text(
+                "from pathlib import Path\n"
+                "Path('answer.md').write_text('ok', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            config = self.write_config(root, worker)
+            with config.open("a", encoding="utf-8") as handle:
+                handle.write(f"\n[hud]\nport = {hud_port}\n")
+            proc = self.run_cli(
+                [
+                    "ask",
+                    "Answer this.",
+                    "--engine",
+                    "answer-mock",
+                    "--config",
+                    str(config),
+                    "--workdir",
+                    str(root / "request"),
+                    "--identity",
+                    "ask-no-hud-test",
+                ],
+                home=home,
+            )
+            # Only that the run stage was reached (so ensure_hud_running ran);
+            # the worker's own pass/fail is not this test's concern.
+            self.assertIn("Summary", proc.stdout, proc.stdout + proc.stderr)
+            self.assertFalse(ringer.hud_is_alive(hud_port))
+            with socket.socket() as sock:
+                self.assertNotEqual(0, sock.connect_ex(("127.0.0.1", hud_port)))
 
     def test_redact_hides_request_metadata_but_preserves_worker_output(self) -> None:
         with tempfile.TemporaryDirectory() as temp_root:
