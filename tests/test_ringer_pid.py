@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import ctypes
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,6 +39,54 @@ class RingerPidModuleTests(unittest.TestCase):
         self.assertFalse(ringer_pid.pid_is_alive(-5))
 
 
+class RingerSiblingImportTests(unittest.TestCase):
+    """ringer.py must find ringer_pid.py however it is launched."""
+
+    def run_py(self, args: list[str], cwd: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, *args],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env={**os.environ, "RINGER_NO_SELF_UPDATE": "1", "PYTHONPATH": ""},
+        )
+
+    def test_isolated_mode_from_another_cwd_still_imports_the_sibling(self) -> None:
+        with tempfile.TemporaryDirectory() as other:
+            for flags in (["-I"], ["-P"]):
+                proc = self.run_py([*flags, str(ROOT / "ringer.py"), "--help"], other)
+                self.assertEqual(0, proc.returncode, f"{flags}: {proc.stderr}")
+
+    def test_safe_path_env_still_imports_the_sibling(self) -> None:
+        with tempfile.TemporaryDirectory() as other:
+            proc = subprocess.run(
+                [sys.executable, str(ROOT / "ringer.py"), "--help"],
+                cwd=other,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                env={**os.environ, "RINGER_NO_SELF_UPDATE": "1", "PYTHONSAFEPATH": "1"},
+            )
+            self.assertEqual(0, proc.returncode, proc.stderr)
+
+    def test_bare_pytest_collects_test_ringer_from_another_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as other:
+            proc = self.run_py(
+                ["-m", "pytest", str(ROOT / "tests" / "test_ringer.py"), "--collect-only", "-q"],
+                other,
+            )
+            self.assertEqual(0, proc.returncode, proc.stdout[-800:] + proc.stderr[-800:])
+
+    def test_standalone_copy_without_the_sibling_names_ringer_pid(self) -> None:
+        with tempfile.TemporaryDirectory() as lone:
+            shutil.copy(ROOT / "ringer.py", lone)
+            proc = self.run_py([str(Path(lone) / "ringer.py"), "--help"], lone)
+            self.assertNotEqual(0, proc.returncode)
+            self.assertIn("ringer_pid.py", proc.stderr)
+            self.assertNotIn("Traceback", proc.stderr)
+
+
 @unittest.skipUnless(sys.platform == "win32", "Windows process handles")
 class WindowsPidSeamTests(unittest.TestCase):
     def test_protected_process_we_cannot_open_reads_alive(self) -> None:
@@ -44,6 +95,21 @@ class WindowsPidSeamTests(unittest.TestCase):
         # can't open it - same meaning as the POSIX PermissionError branch.
         # (Elevated, the open succeeds and it reads alive via the exit code.)
         self.assertTrue(ringer_pid.pid_is_alive(4))
+
+    def open_process_failing_with(self, last_error: int) -> bool:
+        # Pins the OpenProcess failure mapping regardless of elevation (pid 4
+        # opens fine on an elevated runner, so the test above cannot).
+        fake_kernel32 = unittest.mock.MagicMock()
+        fake_kernel32.OpenProcess.return_value = None
+        with unittest.mock.patch("ctypes.WinDLL", return_value=fake_kernel32), \
+                unittest.mock.patch("ctypes.get_last_error", return_value=last_error):
+            return ringer_pid._windows_pid_is_alive(4242)
+
+    def test_open_process_access_denied_reads_alive(self) -> None:
+        self.assertTrue(self.open_process_failing_with(5))  # ERROR_ACCESS_DENIED
+
+    def test_open_process_invalid_parameter_reads_dead(self) -> None:
+        self.assertFalse(self.open_process_failing_with(87))  # ERROR_INVALID_PARAMETER
 
     def test_probe_does_not_leak_process_handles(self) -> None:
         ringer_pid.pid_is_alive(os.getpid())  # warm any lazy loader state
