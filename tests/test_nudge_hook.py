@@ -151,8 +151,10 @@ class NudgeHookTests(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == "win32", "os.kill(pid, 0) is only a Ctrl+C on Windows")
     def test_pid_probe_never_calls_os_kill_on_windows(self) -> None:
-        # On Windows os.kill(pid, 0) is GenerateConsoleCtrlEvent(CTRL_C_EVENT):
-        # the hook runs on Claude's console, so probing would interrupt it.
+        # On Windows os.kill(pid, 0) is GenerateConsoleCtrlEvent(CTRL_C_EVENT)
+        # (a Ctrl+C to a pid sharing the caller's console) and raises OSError
+        # (WinError 87) for a dead pid, which the hook would swallow without
+        # nudging or pruning.
         spec = importlib.util.spec_from_file_location("ringer_nudge_under_test", HOOK)
         assert spec is not None and spec.loader is not None
         hook = importlib.util.module_from_spec(spec)
@@ -161,6 +163,28 @@ class NudgeHookTests(unittest.TestCase):
             self.assertTrue(hook.pid_is_alive(os.getpid()))
             self.assertFalse(hook.pid_is_alive(0))
             self.assertFalse(hook.pid_is_alive("not-a-pid"))
+
+    def test_pid_probe_does_not_import_ringer(self) -> None:
+        # The hook runs on every probing tool call; importing all of ringer.py
+        # costs ~300 ms and drags in its Python 3.12 SystemExit. The probe lives
+        # in the small standalone ringer_pid module.
+        code = (
+            "import importlib.util, os, sys\n"
+            "spec = importlib.util.spec_from_file_location('hook', sys.argv[1])\n"
+            "hook = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(hook)\n"
+            "assert hook.pid_is_alive(os.getpid())\n"
+            "assert not hook.pid_is_alive(0)\n"
+            "print('ringer' in sys.modules, 'ringer_pid' in sys.modules)\n"
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", code, str(HOOK)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env={**os.environ, "HOME": str(self.home), "RINGER_HOME": str(self.ringer_home)},
+        )
+        self.assertEqual("False True", proc.stdout.strip(), proc.stdout + proc.stderr)
 
     def test_malformed_stdin_exits_zero_silently(self) -> None:
         proc = self.run_hook("pre-bash", "{not json")

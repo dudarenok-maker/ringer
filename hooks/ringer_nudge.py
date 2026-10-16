@@ -45,10 +45,15 @@ def pid_is_alive(pid: Any) -> bool:
         return False
     if parsed <= 0:
         return False
-    # ringer.py owns the platform-correct probe: os.kill(pid, 0) is a Ctrl+C
-    # to the whole console on Windows, and this hook runs on the agent's console.
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from ringer import pid_is_alive as ringer_pid_is_alive
+    # ringer_pid owns the platform-correct probe: on Windows os.kill(pid, 0)
+    # raises OSError (WinError 87) for a dead pid, which this hook would swallow
+    # without nudging or pruning, and is a Ctrl+C to a pid sharing the console.
+    # It is a tiny stdlib-only module, so importing it costs next to nothing
+    # (importing ringer.py itself would cost ~300 ms per call).
+    repo_root = str(Path(__file__).resolve().parents[1])
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    from ringer_pid import pid_is_alive as ringer_pid_is_alive
 
     return ringer_pid_is_alive(parsed)
 
