@@ -66,17 +66,24 @@ class RingerSiblingImportTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
                 timeout=120,
-                env={**os.environ, "RINGER_NO_SELF_UPDATE": "1", "PYTHONSAFEPATH": "1"},
+                env={**os.environ, "RINGER_NO_SELF_UPDATE": "1", "PYTHONSAFEPATH": "1", "PYTHONPATH": ""},
             )
             self.assertEqual(0, proc.returncode, proc.stderr)
 
-    def test_bare_pytest_collects_test_ringer_from_another_cwd(self) -> None:
+    def test_loading_ringer_by_path_from_another_cwd_imports_the_sibling(self) -> None:
+        # What a test runner's by-path collection does, stdlib only (the suite
+        # must not need pytest). sys.modules registration is required or the
+        # module's @dataclass definitions raise.
+        loader = (
+            "import importlib.util,sys;"
+            "s=importlib.util.spec_from_file_location('ringer_under_test', sys.argv[1]);"
+            "m=importlib.util.module_from_spec(s);"
+            "sys.modules[s.name]=m;"
+            "s.loader.exec_module(m)"
+        )
         with tempfile.TemporaryDirectory() as other:
-            proc = self.run_py(
-                ["-m", "pytest", str(ROOT / "tests" / "test_ringer.py"), "--collect-only", "-q"],
-                other,
-            )
-            self.assertEqual(0, proc.returncode, proc.stdout[-800:] + proc.stderr[-800:])
+            proc = self.run_py(["-c", loader, str(ROOT / "ringer.py")], other)
+            self.assertEqual(0, proc.returncode, proc.stderr[-800:])
 
     def test_standalone_copy_without_the_sibling_names_ringer_pid(self) -> None:
         with tempfile.TemporaryDirectory() as lone:
