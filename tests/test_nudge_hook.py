@@ -46,13 +46,18 @@ class NudgeHookTests(unittest.TestCase):
             check=False,
         )
 
-    def pre_bash_payload(self, command: str, session_id: str = "session-1") -> dict[str, object]:
-        return {
+    def pre_bash_payload(
+        self, command: str, session_id: str = "session-1", cwd: str | None = None
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {
             "session_id": session_id,
             "hook_event_name": "PreToolUse",
             "tool_name": "Bash",
             "tool_input": {"command": command},
         }
+        if cwd is not None:
+            payload["cwd"] = cwd
+        return payload
 
     def post_edit_payload(
         self,
@@ -84,18 +89,22 @@ class NudgeHookTests(unittest.TestCase):
         self.assertEqual("", proc.stdout)
         self.assertEqual("", proc.stderr)
 
-    def write_active_run(self, pid: int, workdir: str = "/tmp/live-ringer-work") -> None:
+    def write_active_run(self, pid: int, workdir: str | None = "/tmp/live-ringer-work") -> None:
         path = self.ringer_home / "active-runs.json"
-        payload = {
-            "run-live": {
-                "pid": pid,
-                "identity": "test-agent",
-                "run_name": "test-run",
-                "workdir": workdir,
-                "started_at": datetime.now(timezone.utc).isoformat(),
-            }
+        entry = {
+            "pid": pid,
+            "identity": "test-agent",
+            "run_name": "test-run",
+            "started_at": datetime.now(timezone.utc).isoformat(),
         }
-        path.write_text(json.dumps(payload), encoding="utf-8")
+        if workdir is not None:  # None models a legacy entry without a workdir
+            entry["workdir"] = workdir
+        path.write_text(json.dumps({"run-live": entry}), encoding="utf-8")
+
+    def dead_pid(self) -> int:
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        proc.wait()
+        return proc.pid
 
     def test_pre_bash_nudges_on_harness_script(self) -> None:
         proc = self.run_hook("pre-bash", self.pre_bash_payload("node probe-simulate.mjs"))
@@ -114,10 +123,80 @@ class NudgeHookTests(unittest.TestCase):
         proc = self.run_hook("pre-bash", self.pre_bash_payload("python3 ringer.py run manifest.json"))
         self.assertSilent(proc)
 
-    def test_pre_bash_stays_silent_when_active_run_has_live_pid(self) -> None:
-        self.write_active_run(os.getpid())
+    def test_pre_bash_stays_silent_when_cwd_is_inside_live_run_workdir(self) -> None:
+        self.write_active_run(os.getpid(), "/tmp/live-ringer-work")
+        for cwd in ("/tmp/live-ringer-work", "/tmp/live-ringer-work/tasks/a"):
+            payload = self.pre_bash_payload("node probe-simulate.mjs", f"s-{cwd}", cwd=cwd)
+            self.assertSilent(self.run_hook("pre-bash", payload))
+
+    def test_pre_bash_nudges_when_live_run_is_elsewhere(self) -> None:
+        # An unrelated interactive session must keep its nudge while some other
+        # run (e.g. an Open Engine lane) is live.
+        self.write_active_run(os.getpid(), "/tmp/live-ringer-work")
+        payload = self.pre_bash_payload("node probe-simulate.mjs", cwd="/home/me/project")
+        self.assertNudged(self.run_hook("pre-bash", payload), "PreToolUse")
+
+    def test_pre_bash_nudges_for_prefix_sibling_of_run_workdir(self) -> None:
+        self.write_active_run(os.getpid(), "/tmp/live-ringer-work")
+        payload = self.pre_bash_payload("node probe-simulate.mjs", cwd="/tmp/live-ringer-work2")
+        self.assertNudged(self.run_hook("pre-bash", payload), "PreToolUse")
+
+    def test_pre_bash_nudges_when_run_is_dead(self) -> None:
+        self.write_active_run(self.dead_pid(), "/tmp/live-ringer-work")
+        payload = self.pre_bash_payload("node probe-simulate.mjs", cwd="/tmp/live-ringer-work")
+        self.assertNudged(self.run_hook("pre-bash", payload), "PreToolUse")
+
+    def test_pre_bash_nudges_for_legacy_entry_without_workdir(self) -> None:
+        self.write_active_run(os.getpid(), None)
+        payload = self.pre_bash_payload("node probe-simulate.mjs", cwd="/tmp/live-ringer-work")
+        self.assertNudged(self.run_hook("pre-bash", payload), "PreToolUse")
+
+    def test_pre_bash_nudges_when_payload_has_no_cwd(self) -> None:
+        self.write_active_run(os.getpid(), "/tmp/live-ringer-work")
         proc = self.run_hook("pre-bash", self.pre_bash_payload("node probe-simulate.mjs"))
-        self.assertSilent(proc)
+        self.assertNudged(proc, "PreToolUse")
+
+    def test_post_edit_silent_only_inside_live_run_workdir(self) -> None:
+        self.write_active_run(os.getpid(), "/tmp/live-ringer-work")
+        for i in range(8):
+            payload = self.post_edit_payload(f"/tmp/f{i % 3}.py", "inside")
+            payload["cwd"] = "/tmp/live-ringer-work/sub"
+            self.assertSilent(self.run_hook("post-edit", payload))
+        for i in range(7):
+            payload = self.post_edit_payload(f"/tmp/f{i % 3}.py", "outside")
+            payload["cwd"] = "/home/me/project"
+            self.assertSilent(self.run_hook("post-edit", payload))
+        payload = self.post_edit_payload("/tmp/f2.py", "outside")
+        payload["cwd"] = "/home/me/project"
+        self.assertNudged(self.run_hook("post-edit", payload), "PostToolUse")
+
+    def load_hook(self):
+        spec = importlib.util.spec_from_file_location("ringer_nudge_paths", HOOK)
+        assert spec is not None and spec.loader is not None
+        hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hook)
+        return hook
+
+    def test_path_inside_handles_windows_spellings(self) -> None:
+        inside = self.load_hook().path_is_inside
+        wd = "C:\\Work\\Run1"
+        self.assertTrue(inside("c:\\work\\run1", wd))  # drive + dir case
+        self.assertTrue(inside("C:/Work/Run1/", wd))  # forward slashes, trailing slash
+        self.assertTrue(inside("C:\\Work\\Run1\\tasks\\a", wd))
+        self.assertTrue(inside("C:\\Work\\Run1\\tasks\\..\\x", wd))  # .. resolved
+        self.assertTrue(inside("C:\\Work\\Run1", "c:/work/run1/"))
+        self.assertFalse(inside("C:\\Work\\Run1\\..\\Other", wd))  # .. escapes
+        self.assertFalse(inside("C:\\Work\\Run12", wd))  # prefix sibling
+        self.assertFalse(inside("D:\\Work\\Run1", wd))  # other drive
+        self.assertFalse(inside("C:\\Work", wd))  # parent
+        self.assertFalse(inside("", wd))
+        self.assertFalse(inside("C:\\Work\\Run1", ""))
+
+    def test_path_inside_posix_is_case_sensitive(self) -> None:
+        inside = self.load_hook().path_is_inside
+        self.assertTrue(inside("/a/b/c", "/a/b/"))
+        self.assertFalse(inside("/a/B/c", "/a/b"))
+        self.assertFalse(inside("/a/bc", "/a/b"))
 
     def test_pre_bash_dedupes_per_session(self) -> None:
         first = self.run_hook("pre-bash", self.pre_bash_payload("node probe-simulate.mjs"))

@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import ntpath
 import os
+import posixpath
 import re
 import sys
 from datetime import datetime, timezone
@@ -11,6 +13,10 @@ from pathlib import Path
 from typing import Any
 
 
+# The nudge is suppressed only for a session whose payload `cwd` is inside a
+# LIVE run's recorded `workdir` (active-runs.json) - that session is the run's
+# own worker. A live run elsewhere on the box (e.g. an Open Engine lane) must not
+# silence an unrelated interactive session.
 NUDGE_TEXT = (
     "Ringer routing check: this looks like swarm-shaped work happening inline "
     "(model call/harness/edit loop outside a live Ringer run). Load the ringer "
@@ -134,12 +140,38 @@ def output_nudge(event_name: str) -> None:
     sys.stdout.write("\n")
 
 
-def command_references_active_workdir(command: str, active_runs: dict[str, dict[str, Any]]) -> bool:
-    for entry in active_runs.values():
-        workdir = str(entry.get("workdir") or "").strip()
-        if workdir and workdir in command:
-            return True
-    return False
+def path_is_inside(path: Any, root: Any) -> bool:
+    """True when `path` is `root` or lies beneath it.
+
+    Compared component-wise (so a work2 sibling is not inside work), with `..`
+    and doubled/trailing separators normalised. A Windows-style path (drive
+    letter, UNC, or backslash on either side) is compared with ntpath
+    semantics: case-insensitive, a forward slash equals a backslash, drive
+    letters compared too. Anything else uses posixpath. A missing/blank side
+    is never inside.
+    """
+    if not isinstance(path, str) or not isinstance(root, str):
+        return False
+    path, root = path.strip(), root.strip()
+    if not path or not root:
+        return False
+    windows = any(re.match(r"^[A-Za-z]:|^\\|\\", value) for value in (path, root))
+    mod = ntpath if windows else posixpath
+    norm_path = mod.normcase(mod.normpath(path))
+    norm_root = mod.normcase(mod.normpath(root))
+    try:
+        return mod.commonpath([norm_path, norm_root]) == norm_root
+    except ValueError:  # different drives, or absolute vs relative
+        return False
+
+
+def session_inside_live_run(payload: dict[str, Any], active_runs: dict[str, dict[str, Any]]) -> bool:
+    """True when the hook's session cwd is inside a live run's recorded workdir,
+    i.e. the session is that run's own worker. A run elsewhere on the box, or a
+    legacy entry with no `workdir`, never silences the nudge.
+    """
+    cwd = payload.get("cwd")
+    return any(path_is_inside(cwd, entry.get("workdir")) for entry in active_runs.values())
 
 
 def should_nudge_pre_bash(payload: dict[str, Any], home: Path) -> bool:
@@ -154,12 +186,7 @@ def should_nudge_pre_bash(payload: dict[str, Any], home: Path) -> bool:
     if not (PROVIDER_RE.search(command) or HARNESS_RE.search(command)):
         return False
 
-    active_runs = read_live_active_runs(home)
-    if active_runs:
-        return False
-    if command_references_active_workdir(command, active_runs):
-        return False
-    return True
+    return not session_inside_live_run(payload, read_live_active_runs(home))
 
 
 def post_edit_state_path(home: Path, session_id: Any) -> Path:
@@ -203,7 +230,7 @@ def should_nudge_post_edit(payload: dict[str, Any], home: Path) -> bool:
     count, distinct_files = record_post_edit(payload, home)
     if count < 8 or distinct_files < 3:
         return False
-    return not read_live_active_runs(home)
+    return not session_inside_live_run(payload, read_live_active_runs(home))
 
 
 def load_stdin_payload() -> dict[str, Any] | None:
