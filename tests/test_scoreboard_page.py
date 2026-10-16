@@ -75,6 +75,7 @@ class ScoreboardPageTests(unittest.TestCase):
         self.old_env = os.environ.copy()
         self.addCleanup(self.restore_env)
         os.environ["HOME"] = str(self.root / "home")
+        os.environ["USERPROFILE"] = str(self.root / "home")
         os.environ["RINGER_HOME"] = str(self.root / "ringer-home")
         self.log_path = self.root / "eval.jsonl"
         self.catalog_path = self.root / "catalog.json"

@@ -29,6 +29,7 @@ class ArtifactWrapperTests(unittest.TestCase):
         self.addCleanup(self.restore_env)
         self.root = Path(self.tmp.name)
         os.environ["HOME"] = str(self.root / "home")
+        os.environ["USERPROFILE"] = str(self.root / "home")
         os.environ["RINGER_HOME"] = str(self.root / "ringer-home")
         self.artifact_path = self.root / "artifacts" / "run-123.html"
         self.renderer = ArtifactRenderer(self.artifact_path)
