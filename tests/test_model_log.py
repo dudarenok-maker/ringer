@@ -659,6 +659,25 @@ class RealRegistryDefaultsTests(unittest.TestCase):
             {"DeepSeek V4.1 Flash": 2, "GLM 5.3": 1, "DeepSeek V4 Pro": 1},
         )
 
+    def test_current_claude_and_cline_free_models_resolve_registered(self) -> None:
+        # The claude lane now runs claude-sonnet-5-5 and cline-free runs
+        # cline-free/step-5-preview (open-engine#102). Unregistered, each
+        # resolved as lab "(unverified)" / confidence "fallback". The defaults
+        # must point at the current keys; the older entries stay (append-only).
+        registry = self._real_registry()
+        for engine, slug, lab, old_slug in (
+            ("claude", "claude-sonnet-5-5", "Anthropic", "claude-sonnet-5"),
+            ("cline-free", "cline-free/step-5-preview", "StepFun",
+             "deepseek/deepseek-v4.1-flash"),
+        ):
+            with self.subTest(engine=engine):
+                self.assertEqual(registry.defaults.get(engine), slug)
+                identity = registry.resolve(engine, slug)
+                self.assertFalse(identity.unregistered)
+                self.assertEqual(identity.lab, lab)
+                self.assertNotEqual(identity.confidence, "fallback")
+                self.assertFalse(registry.resolve(engine, old_slug).unregistered)
+
     def test_retired_cline_key_and_its_successor_share_one_scoreboard_row(
         self,
     ) -> None:
