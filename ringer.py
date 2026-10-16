@@ -43,7 +43,20 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Iterable
 
-from ringer_pid import pid_is_alive
+# ringer_pid.py is a sibling module; -I, -P, PYTHONSAFEPATH and by-path loaders
+# do not put this file's directory on sys.path, so do it explicitly.
+_RINGER_DIR = str(Path(__file__).resolve().parent)
+if _RINGER_DIR not in sys.path:
+    sys.path.insert(0, _RINGER_DIR)
+try:
+    from ringer_pid import pid_is_alive
+except ModuleNotFoundError as _exc:  # pragma: no cover - exercised via subprocess in tests.
+    if _exc.name != "ringer_pid":
+        raise
+    raise SystemExit(
+        f"ringer.py needs its sibling ringer_pid.py next to it (looked in {_RINGER_DIR}); "
+        "copy both files together, or reinstall from a full checkout."
+    ) from None
 
 
 TOOL_NAME = "ringer"
@@ -125,7 +138,8 @@ function update(states) {
 
 # ---------------------------------------------------------------------------
 # One-request context packet selection
-# Inlined to preserve Ringer's single-file, standard-library-only design.
+# Inlined here (not a separate module) to keep Ringer standard-library-only;
+# the only sibling module is ringer_pid.py, the pid-liveness probe.
 # ---------------------------------------------------------------------------
 
 SUPPORTED_SUFFIXES = {
