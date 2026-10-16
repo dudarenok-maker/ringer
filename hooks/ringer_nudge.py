@@ -53,7 +53,7 @@ def pid_is_alive(pid: Any) -> bool:
         return False
     # ringer_pid owns the platform-correct probe: on Windows os.kill(pid, 0)
     # raises OSError (WinError 87) for a dead pid, which this hook would swallow
-    # without nudging or pruning, and is a Ctrl+C to a pid sharing the console.
+    # without filtering the entry out, and is a Ctrl+C to a pid sharing the console.
     # It is a tiny stdlib-only module, so importing it costs next to nothing
     # (importing ringer.py itself would cost ~300 ms per call).
     repo_root = str(Path(__file__).resolve().parents[1])
@@ -82,19 +82,14 @@ def read_live_active_runs(home: Path) -> dict[str, dict[str, Any]]:
     if not isinstance(raw, dict):
         return {}
 
+    # Read-only: dead entries are filtered in memory, never written back. The
+    # hook holds no _active_runs_lock, so a prune-write here could drop a run
+    # registered between this read and that write; ringer's locked
+    # register/unregister paths do the pruning.
     live: dict[str, dict[str, Any]] = {}
-    changed = False
     for run_id, entry in raw.items():
-        if not isinstance(entry, dict):
-            changed = True
-            continue
-        if pid_is_alive(entry.get("pid")):
+        if isinstance(entry, dict) and pid_is_alive(entry.get("pid")):
             live[str(run_id)] = entry
-        else:
-            changed = True
-
-    if changed:
-        write_json_atomic(path, live)
     return live
 
 

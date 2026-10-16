@@ -233,7 +233,7 @@ class NudgeHookTests(unittest.TestCase):
         # On Windows os.kill(pid, 0) is GenerateConsoleCtrlEvent(CTRL_C_EVENT)
         # (a Ctrl+C to a pid sharing the caller's console) and raises OSError
         # (WinError 87) for a dead pid, which the hook would swallow without
-        # nudging or pruning.
+        # filtering the entry out.
         spec = importlib.util.spec_from_file_location("ringer_nudge_under_test", HOOK)
         assert spec is not None and spec.loader is not None
         hook = importlib.util.module_from_spec(spec)
@@ -264,6 +264,66 @@ class NudgeHookTests(unittest.TestCase):
             env={**os.environ, "HOME": str(self.home), "RINGER_HOME": str(self.ringer_home)},
         )
         self.assertEqual("False True", proc.stdout.strip(), proc.stdout + proc.stderr)
+
+    def load_hook(self):
+        spec = importlib.util.spec_from_file_location("ringer_nudge_under_test", HOOK)
+        assert spec is not None and spec.loader is not None
+        hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hook)
+        return hook
+
+    def test_read_live_active_runs_never_rewrites_the_file(self) -> None:
+        # The hook holds no _active_runs_lock, so a prune-write could drop a run
+        # registered between its read and its write. Ringer's locked paths prune.
+        path = self.ringer_home / "active-runs.json"
+        live = {"pid": os.getpid(), "workdir": "/live", "run_name": "live"}
+        dead = {"pid": self.dead_pid(), "workdir": "/dead", "run_name": "dead"}
+        path.write_text(json.dumps({"run-live": live, "run-dead": dead}), encoding="utf-8")
+        before = path.read_bytes()
+        runs = self.load_hook().read_live_active_runs(self.ringer_home)
+        self.assertEqual(["run-live"], list(runs))
+        self.assertEqual(before, path.read_bytes())
+
+    def test_register_between_hook_read_and_probe_survives(self) -> None:
+        # Forced interleave: a separate process registers a run after the hook
+        # has read the file but before it finishes probing.
+        path = self.ringer_home / "active-runs.json"
+        dead = {"pid": self.dead_pid(), "workdir": "/dead", "run_name": "dead"}
+        path.write_text(json.dumps({"run-dead": dead}), encoding="utf-8")
+        hook = self.load_hook()
+        real_probe = hook.pid_is_alive
+        registered = []
+
+        def probe_then_register(pid):
+            if not registered:
+                code = (
+                    "import sys\n"
+                    f"sys.path.insert(0, {str(ROOT)!r})\n"
+                    "import os, ringer\n"
+                    "from pathlib import Path\n"
+                    "ringer.register_active_run('lane-C', 'id', 'lane-C', Path('/c'),"
+                    " pid=int(sys.argv[1]))\n"
+                )
+                proc = subprocess.run(
+                    [sys.executable, "-c", code, str(os.getpid())],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    env={
+                        **os.environ,
+                        "HOME": str(self.home),
+                        "USERPROFILE": str(self.home),
+                        "RINGER_HOME": str(self.ringer_home),
+                        "RINGER_NO_SELF_UPDATE": "1",
+                    },
+                )
+                self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+                registered.append(True)
+            return real_probe(pid)
+
+        with unittest.mock.patch.object(hook, "pid_is_alive", probe_then_register):
+            hook.read_live_active_runs(self.ringer_home)
+        self.assertIn("lane-C", json.loads(path.read_text(encoding="utf-8")))
 
     def test_malformed_stdin_exits_zero_silently(self) -> None:
         proc = self.run_hook("pre-bash", "{not json")
