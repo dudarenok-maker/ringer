@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -13,6 +14,7 @@ sys.path.insert(0, str(ROOT))
 
 from ringer import (  # noqa: E402
     active_runs_path,
+    pid_is_alive,
     read_active_runs,
     register_active_run,
     unregister_active_run,
@@ -84,6 +86,56 @@ class ActiveRunsTests(unittest.TestCase):
         register_active_run("live-run", "agent-a", "Live", Path(self.tmp.name))
         data = json.loads(marker.read_text(encoding="utf-8"))
         self.assertEqual(["live-run"], sorted(data))
+
+
+class PidIsAliveTests(unittest.TestCase):
+    def test_own_process_is_alive(self) -> None:
+        self.assertTrue(pid_is_alive(os.getpid()))
+
+    def test_exited_process_is_not_alive(self) -> None:
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        proc.wait()
+        self.assertFalse(pid_is_alive(proc.pid))
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows console control events")
+    def test_liveness_probe_never_sends_ctrl_c_to_the_shared_console(self) -> None:
+        # On Windows os.kill(pid, 0) is GenerateConsoleCtrlEvent(CTRL_C_EVENT):
+        # when the caller shares its console with any other process, every
+        # process on that console gets Ctrl+C. register_active_run() probes
+        # its OWN pid, so `ringer.py run` launched from any wrapper (a shell
+        # script, a background task) interrupted itself and its parent a few
+        # seconds after start. Reproduce in a fresh hidden console so the
+        # test runner's own console is never hit, even before the fix.
+        child = (
+            "import os, sys; sys.path.insert(0, sys.argv[1]); "
+            "from ringer import pid_is_alive; "
+            "print('own', pid_is_alive(os.getpid()), "
+            "'parent', pid_is_alive(os.getppid()), flush=True)"
+        )
+        parent = (
+            "import subprocess, sys, time\n"
+            "try:\n"
+            "    out = subprocess.run([sys.executable, '-c', sys.argv[1], sys.argv[2]],\n"
+            "                         capture_output=True, text=True, timeout=60)\n"
+            "    print(out.stdout.strip(), out.stderr.strip(), flush=True)\n"
+            "    time.sleep(1.0)\n"
+            "    print('parent survived', flush=True)\n"
+            "except KeyboardInterrupt:\n"
+            "    print('parent got KeyboardInterrupt', flush=True)\n"
+        )
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 0  # SW_HIDE
+        result = subprocess.run(
+            [sys.executable, "-c", parent, child, str(ROOT)],
+            capture_output=True,
+            text=True,
+            timeout=90,
+            creationflags=subprocess.CREATE_NEW_CONSOLE,
+            startupinfo=startupinfo,
+        )
+        self.assertIn("own True parent True", result.stdout, result.stdout + result.stderr)
+        self.assertIn("parent survived", result.stdout, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":
