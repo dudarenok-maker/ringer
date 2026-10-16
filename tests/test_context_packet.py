@@ -226,10 +226,6 @@ class ContextPacketTests(unittest.TestCase):
             )
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
-
-
 class OversizedPassageDiagnosticsTests(unittest.TestCase):
     """A passage that matches but does not fit must say so.
 
@@ -386,3 +382,7 @@ class DirectoryScanContainmentTests(unittest.TestCase):
             )
 
             self.assertIn("Friday night", packet.text)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

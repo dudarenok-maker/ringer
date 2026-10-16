@@ -406,10 +406,6 @@ class AskCommandTests(unittest.TestCase):
             TaskSpec.from_obj({**base, "max_attempts": 0})
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
-
-
 class NewFieldTypeStrictnessTests(unittest.TestCase):
     """`max_attempts` and `redact_spec` reject truthy stand-ins.
 
@@ -449,3 +445,7 @@ class NewFieldTypeStrictnessTests(unittest.TestCase):
         task = TaskSpec.from_obj(self._task())
         self.assertEqual(2, task.max_attempts)
         self.assertFalse(task.redact_spec)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
