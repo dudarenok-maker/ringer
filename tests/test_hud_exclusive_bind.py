@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
 import socket
 import sys
 import tempfile
 import unittest
+import urllib.request
 from pathlib import Path
 from unittest import mock
 
@@ -16,7 +18,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import ringer  # noqa: E402
-from ringer import AppConfig, ArtifactConfig, EvalConfig, PersistentHudServer, ReusableThreadingHTTPServer  # noqa: E402
+from ringer import (  # noqa: E402
+    AppConfig,
+    ArtifactConfig,
+    Dashboard,
+    EvalConfig,
+    PersistentHudServer,
+    ReusableThreadingHTTPServer,
+)
 
 
 def free_port() -> int:
@@ -108,6 +117,44 @@ class LoserOfBindRaceTests(unittest.TestCase):
                 code = ringer.run_persistent_hud(cfg, port=None, open_viewer=False)
             self.assertEqual(1, code)
             self.assertIn("port in use", err.getvalue())
+
+    def test_open_viewer_is_honoured_when_the_race_is_lost(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            cfg = self.make_config(Path(temp), free_port())
+            probes = iter([False, True])
+            opened: list[str] = []
+            with (
+                mock.patch.object(ringer, "hud_is_alive", side_effect=lambda _p: next(probes)),
+                mock.patch.object(PersistentHudServer, "start", side_effect=RuntimeError("port in use")),
+                mock.patch.object(ringer, "open_in_browser", side_effect=opened.append),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                code = ringer.run_persistent_hud(cfg, port=None, open_viewer=True)
+            self.assertEqual(0, code)
+            self.assertEqual([f"http://127.0.0.1:{cfg.hud_port}"], opened)
+
+
+class DashboardBindTests(unittest.TestCase):
+    """Concurrent runs must not share a dashboard port (Windows SO_REUSEADDR double-bind)."""
+
+    def test_two_dashboards_get_distinct_ports_and_serve_their_own_state(self) -> None:
+        preferred = free_port()
+        dashboards: list[Dashboard] = []
+        with tempfile.TemporaryDirectory() as temp:
+            for name in ("a", "b"):
+                state = Path(temp) / name / "runs"
+                state.mkdir(parents=True)
+                (state / "state.json").write_text(json.dumps({"run": name}), encoding="utf-8")
+                dash = Dashboard(state / "state.json", preferred, open_viewer=False)
+                dash.start()
+                assert dash.httpd is not None
+                self.addCleanup(dash.httpd.server_close)
+                self.addCleanup(dash.httpd.shutdown)
+                dashboards.append(dash)
+            self.assertNotEqual(dashboards[0].port, dashboards[1].port)
+            for dash, name in zip(dashboards, ("a", "b")):
+                with urllib.request.urlopen(f"http://127.0.0.1:{dash.port}/state.json", timeout=5) as resp:
+                    self.assertEqual(name, json.load(resp)["run"])
 
 
 class NoHudEnvTests(unittest.TestCase):

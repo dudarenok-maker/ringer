@@ -6595,7 +6595,7 @@ class Dashboard:
         last_error: OSError | None = None
         for port in range(self.preferred_port, self.preferred_port + 50):
             try:
-                self.httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+                self.httpd = ReusableThreadingHTTPServer(("127.0.0.1", port), Handler)
             except OSError as exc:
                 last_error = exc
                 continue
@@ -12014,7 +12014,10 @@ def run_persistent_hud(config: AppConfig, *, port: int | None, open_viewer: bool
         # Lost a bind race against a sibling spawn (both probed "dead"): the
         # winner is the HUD, so this is success, not a traceback.
         if hud_is_alive(chosen_port):
-            print(f"Ringside is already running: http://127.0.0.1:{chosen_port}")
+            url = f"http://127.0.0.1:{chosen_port}"
+            print(f"Ringside is already running: {url}")
+            if open_viewer:
+                open_in_browser(url)
             return 0
         print(str(exc), file=sys.stderr)
         return 1
