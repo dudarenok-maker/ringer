@@ -138,16 +138,6 @@ class RingerCliTests(unittest.TestCase):
         self.assertEqual(len(state_files), 1)
         return json.loads(state_files[0].read_text(encoding="utf-8"))
 
-    @staticmethod
-    def pid_is_alive(pid: int) -> bool:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
-        return True
-
     def test_failing_check_output_is_logged_and_injected_into_retry(self) -> None:
         manifest = self.write_manifest(
             "diagnostic-fail",
@@ -298,7 +288,7 @@ class RingerCliTests(unittest.TestCase):
                 stdout, _ = proc.communicate(timeout=10)
 
         self.assertEqual(proc.returncode, 130, stdout)
-        self.assertFalse(self.pid_is_alive(worker_pid), stdout)
+        self.assertFalse(ringer.pid_is_alive(worker_pid), stdout)
         state = self.read_final_state()
         self.assertTrue(state["finished"])
         self.assertEqual(state["state"], "finished")
@@ -364,7 +354,7 @@ class RingerCliTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 130, stdout)
         self.assertIn("shutdown already in progress", stdout)
         self.assertNotIn("Traceback", stdout)
-        self.assertFalse(self.pid_is_alive(worker_pid), stdout)
+        self.assertFalse(ringer.pid_is_alive(worker_pid), stdout)
         state = self.read_final_state()
         self.assertTrue(state["finished"])
         self.assertEqual(state["state"], "finished")

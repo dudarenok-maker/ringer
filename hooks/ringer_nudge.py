@@ -45,13 +45,12 @@ def pid_is_alive(pid: Any) -> bool:
         return False
     if parsed <= 0:
         return False
-    try:
-        os.kill(parsed, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+    # ringer.py owns the platform-correct probe: os.kill(pid, 0) is a Ctrl+C
+    # to the whole console on Windows, and this hook runs on the agent's console.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from ringer import pid_is_alive as ringer_pid_is_alive
+
+    return ringer_pid_is_alive(parsed)
 
 
 def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:

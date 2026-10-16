@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -146,6 +148,19 @@ class NudgeHookTests(unittest.TestCase):
         files = ["/tmp/a.py", "/tmp/b.py", "/tmp/a.py", "/tmp/b.py", "/tmp/a.py", "/tmp/b.py", "/tmp/a.py"]
         for file_path in files:
             self.assertSilent(self.run_hook("post-edit", self.post_edit_payload(file_path, "session-2")))
+
+    @unittest.skipUnless(sys.platform == "win32", "os.kill(pid, 0) is only a Ctrl+C on Windows")
+    def test_pid_probe_never_calls_os_kill_on_windows(self) -> None:
+        # On Windows os.kill(pid, 0) is GenerateConsoleCtrlEvent(CTRL_C_EVENT):
+        # the hook runs on Claude's console, so probing would interrupt it.
+        spec = importlib.util.spec_from_file_location("ringer_nudge_under_test", HOOK)
+        assert spec is not None and spec.loader is not None
+        hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hook)
+        with unittest.mock.patch("os.kill", side_effect=AssertionError("os.kill used as a probe")):
+            self.assertTrue(hook.pid_is_alive(os.getpid()))
+            self.assertFalse(hook.pid_is_alive(0))
+            self.assertFalse(hook.pid_is_alive("not-a-pid"))
 
     def test_malformed_stdin_exits_zero_silently(self) -> None:
         proc = self.run_hook("pre-bash", "{not json")
