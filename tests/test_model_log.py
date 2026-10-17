@@ -628,9 +628,11 @@ class RealRegistryDefaultsTests(unittest.TestCase):
 
     def test_cline_free_default_is_mimo_and_step_5_preview_is_kept(self) -> None:
         # The free lane moved off step-5-preview (retired 2026-10-15) onto
-        # MiMo-V2.6-Flash. The lab comes from Cline's model-picker name and was
-        # not checked against a model card, so confidence must stay below
-        # "verified"; the retired entry stays registered (append-only).
+        # MiMo-V2.6-Flash. Cline's picker shows only the model name, no lab;
+        # the lab is provisional, from OpenRouter's catalog org segment
+        # (xiaomi/mimo-v2.6-flash) per docs/TAXONOMY.md, and was not checked
+        # against a model card, so confidence must stay below "verified"; the
+        # retired entry stays registered (append-only).
         registry = self._real_registry()
         slug = "cline-free/mimo-v2.6-flash"
         self.assertEqual(registry.defaults.get("cline-free"), slug)
@@ -645,6 +647,32 @@ class RealRegistryDefaultsTests(unittest.TestCase):
         old = registry.resolve("cline-free", "cline-free/step-5-preview")
         self.assertFalse(old.unregistered)
         self.assertEqual(old.model_display, "Step 5 Preview")
+
+    def test_cline_free_every_era_keeps_its_identity(self) -> None:
+        # Append-only: all four eras of the free lane stay registered with
+        # their own display/lab/access/confidence, so a historical row never
+        # re-attributes (e.g. step-5-preview must stay StepFun, not Xiaomi).
+        registry = self._real_registry()
+        self.assertEqual(
+            registry.defaults.get("cline-free"), "cline-free/mimo-v2.6-flash"
+        )
+        for slug, display, lab, confidence in (
+            ("deepseek/deepseek-v4-flash", "DeepSeek V4 Flash", "DeepSeek",
+             "unverified"),
+            ("deepseek/deepseek-v4.1-flash", "DeepSeek V4.1 Flash", "DeepSeek",
+             "unverified"),
+            ("cline-free/step-5-preview", "Step 5 Preview", "StepFun",
+             "unverified"),
+            ("cline-free/mimo-v2.6-flash", "MiMo-V2.6-Flash", "Xiaomi",
+             "unverified"),
+        ):
+            with self.subTest(slug=slug):
+                identity = registry.resolve("cline-free", slug)
+                self.assertFalse(identity.unregistered)
+                self.assertEqual(identity.model_display, display)
+                self.assertEqual(identity.lab, lab)
+                self.assertEqual(identity.access, "Cline free tier")
+                self.assertEqual(identity.confidence, confidence)
 
     def test_pass_lane_rows_land_in_their_own_named_scoreboard_rows(self) -> None:
         registry = self._real_registry()
