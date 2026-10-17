@@ -12012,7 +12012,8 @@ def run_persistent_hud(config: AppConfig, *, port: int | None, open_viewer: bool
         server.start()
     except RuntimeError as exc:
         # Lost a bind race against a sibling spawn (both probed "dead"): the
-        # winner is the HUD, so this is success, not a traceback.
+        # winner is the HUD, so this is success (before, main()'s catch-all
+        # printed "could not start Ringside..." and exited 2).
         if hud_is_alive(chosen_port):
             url = f"http://127.0.0.1:{chosen_port}"
             print(f"Ringside is already running: {url}")
