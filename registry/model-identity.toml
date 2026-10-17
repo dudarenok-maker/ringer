@@ -217,12 +217,16 @@ source = "live probe 2026-08-16: cline.exe -m cline-pass/deepseek-v4-flash resol
 last_verified = 2026-08-18
 
 [engines.cline.models."cline-pass/deepseek-v4.1-flash"]
-# ERA 2. SUPERSEDED 2026-10-10 by "cline-free/step-5-preview" below.
+# ERA 2 of the retired `cline` key; its successor is the same slug under
+# `cline-pass-deepseek41flash` (open-engine#97, 2026-10-08), which resolves to
+# the same display/lab/access ("Cline Pass").
 # deepseek-v4-flash -> deepseek-v4.1-flash 2026-09-19: ClinePass deprecated
 # the former effective 2026-09-21 (model-updates notice, received 2026-09-19).
-# Kept for every run logged under this key. NOTE: the ~306 rows from
-# 2026-10-02/03 logged under this key are 0-token Cline Credits errors (Cline
-# moved the model off its free tier) that still display "Cline free tier".
+# Kept for every run logged under this key. Counted read-only from
+# ~/.ringer/runs.jsonl (copy, 2026-10-17): 75 rows with model
+# cline-pass/deepseek-v4.1-flash and worker_engine `cline` (2026-09-20 to
+# 2026-10-09; 14 of them on 2026-10-03, none on 10-02), plus 3 under
+# `cline-pass-deepseek41flash`.
 display = "DeepSeek V4.1 Flash"
 lab = "DeepSeek"
 confidence = "unverified"   # slug-derived; DeepSeek's own model page has not been checked
@@ -377,7 +381,7 @@ source = "live probe 2026-09-19: cline.exe -P cline -m deepseek/deepseek-v4.1-fl
 last_verified = 2026-09-19
 
 [engines.cline-free.models."cline-free/step-5-preview"]
-# ERA 3. SUPERSEDED 2026-10-17 by "cline-free/mimo-v2.6-flash" below. deepseek/deepseek-v4.1-flash
+# ERA 3. SUPERSEDED 2026-10-17 by "cline-free/mimo-v2.6-flash" below (open-engine#112). deepseek/deepseek-v4.1-flash
 # -> cline-free/step-5-preview 2026-10-10 (open-engine#102): Cline moved the
 # former off its free tier (it now bills Cline Credits as a paid ClinePass
 # model), so the free lane was repointed at a model still on the free list.
@@ -391,14 +395,15 @@ source = "open-engine#102 (live probe 2026-10-10: cline -P cline -m cline-free/s
 last_verified = 2026-10-10
 
 [engines.cline-free.models."cline-free/mimo-v2.6-flash"]
-# ERA 4 (the default_model_key above). cline-free/step-5-preview ->
-# cline-free/mimo-v2.6-flash 2026-10-17: the former's free promotion ended
+# ERA 4 (CURRENT, and the default_model_key above). cline-free/step-5-preview ->
+# cline-free/mimo-v2.6-flash 2026-10-17 (open-engine#112, issue #111): the
+# former's free promotion ended
 # 2026-10-15, so the free lane was repointed at MiMo-V2.6-Flash, the model
 # Cline's picker lists on its free tier (seen 2026-10-16).
 display = "MiMo-V2.6-Flash"
 lab = "Xiaomi"
-confidence = "unverified"   # lab per Cline's model-picker name; Xiaomi's own model card was not checked
-source = "Cline model picker 2026-10-16 (MiMo-V2.6-Flash on the free tier); Ringer bakeoff cline-free-model-bakeoff 2026-10-17 ran it twice via engine cline-free, both PASS; independent support: OpenRouter catalog snapshot (~/.ringer/openrouter-catalog.json, fetched 2026-10-16) lists xiaomi/mimo-v2.6-flash as \"Xiaomi: MiMo-V2.6-Flash\" (an aggregator listing, not a model card)"
+confidence = "unverified"   # lab provisional, from OpenRouter's catalog org segment (xiaomi/); Cline's picker shows no lab and Xiaomi's own model card was not checked
+source = "model name: Cline model picker 2026-10-16 (MiMo-V2.6-Flash on the free tier; the picker shows no lab); lab: provisional, from the org segment of OpenRouter's catalog entry xiaomi/mimo-v2.6-flash, \"Xiaomi: MiMo-V2.6-Flash\" (snapshot ~/.ringer/openrouter-catalog.json, fetched 2026-10-16; an aggregator listing, not a model card; docs/TAXONOMY.md provisional-lab rule); Ringer bakeoff cline-free-model-bakeoff 2026-10-17 ran it twice via engine cline-free, both PASS"
 last_verified = 2026-10-17
 
 [engines.cline-glm]
