@@ -57,7 +57,10 @@ def coerce_start_time(value: object) -> float | None:
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    value = float(value)
+    try:
+        value = float(value)
+    except (OverflowError, ValueError):  # an int too large for a float
+        return None
     if not math.isfinite(value) or value <= 0:
         return None
     return value
@@ -94,7 +97,7 @@ def _windows_process_start_time(pid: int) -> float | None:
         kernel32.CloseHandle(handle)
 
 
-def _nt_process_start_time(pid: int) -> float | None:
+def _nt_process_start_time(pid: int, initial_size: int = 1 << 20) -> float | None:
     """Creation time via NtQuerySystemInformation(SystemProcessInformation).
 
     Needs no process handle, so it also covers processes OpenProcess refuses.
@@ -137,7 +140,7 @@ def _nt_process_start_time(pid: int) -> float | None:
         ntdll.NtQuerySystemInformation.argtypes = [
             ctypes.c_ulong, ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(ctypes.c_ulong),
         ]
-        size = 1 << 20
+        size = initial_size
         for _ in range(8):
             buf = ctypes.create_string_buffer(size)
             needed = ctypes.c_ulong()

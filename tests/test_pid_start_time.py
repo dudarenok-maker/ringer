@@ -145,12 +145,13 @@ class CoerceStartTimeTests(unittest.TestCase):
         self.assertEqual(5.0, ringer_pid.coerce_start_time(5))
 
     def test_unusable_values_read_as_absent(self) -> None:
-        for bad in (True, False, float("nan"), float("inf"), float("-inf"), 0, 0.0, -1, "x", None, [1], {}):
+        for bad in (True, False, float("nan"), float("inf"), float("-inf"), 0, 0.0, -1, "x", None, [1], {},
+                    10**400, -(10**400)):
             with self.subTest(bad=bad):
                 self.assertIsNone(ringer_pid.coerce_start_time(bad))
 
     def test_unusable_start_time_never_marks_a_live_pid_dead(self) -> None:
-        for bad in (True, float("nan"), float("inf"), float("-inf"), 0, -1, "x"):
+        for bad in (True, float("nan"), float("inf"), float("-inf"), 0, -1, "x", 10**400, -(10**400)):
             with self.subTest(bad=bad):
                 self.assertTrue(ringer_pid.pid_is_alive(os.getpid(), bad))
 
@@ -180,6 +181,27 @@ class BootIdTests(unittest.TestCase):
         with unittest.mock.patch("builtins.open", side_effect=OSError):
             self.assertIsNone(ringer_pid._read_boot_id())
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux only")
+    def test_process_boot_id_is_the_real_kernel_boot_id(self) -> None:
+        with open("/proc/sys/kernel/random/boot_id", encoding="utf-8") as fh:
+            expected = fh.read().strip()
+        self.assertTrue(expected)
+        self.assertEqual(expected, ringer_pid.process_boot_id())
+
+    def test_process_boot_id_reads_exactly_the_kernel_boot_id_path(self) -> None:
+        # Platform-independent: sys.platform is faked only around a pure file
+        # read (no pid probe), and open() asserts the path it is handed.
+        opened: list = []
+
+        def fake_open(path, *args, **kwargs):
+            opened.append(path)
+            return unittest.mock.mock_open(read_data="the-boot-id\n")()
+
+        with unittest.mock.patch.object(ringer_pid.sys, "platform", "linux"), \
+                unittest.mock.patch("builtins.open", fake_open):
+            self.assertEqual("the-boot-id", ringer_pid.process_boot_id())
+        self.assertEqual(["/proc/sys/kernel/random/boot_id"], opened)
+
     def test_no_boot_id_on_windows(self) -> None:
         if sys.platform != "win32":
             self.skipTest("Windows only")
@@ -192,14 +214,16 @@ class WindowsStartTimeSeamTests(unittest.TestCase):
         fake = unittest.mock.MagicMock()
         fake.OpenProcess.return_value = 99
         fake.GetProcessTimes.return_value = 0
-        with unittest.mock.patch("ctypes.WinDLL", return_value=fake),                 unittest.mock.patch.object(ringer_pid, "_nt_process_start_time", return_value=None):
+        with unittest.mock.patch("ctypes.WinDLL", return_value=fake), \
+                unittest.mock.patch.object(ringer_pid, "_nt_process_start_time", return_value=None):
             self.assertIsNone(ringer_pid._windows_process_start_time(4242))
         fake.CloseHandle.assert_called_once_with(99)
 
     def test_open_process_failure_returns_none(self) -> None:
         fake = unittest.mock.MagicMock()
         fake.OpenProcess.return_value = None
-        with unittest.mock.patch("ctypes.WinDLL", return_value=fake),                 unittest.mock.patch.object(ringer_pid, "_nt_process_start_time", return_value=None):
+        with unittest.mock.patch("ctypes.WinDLL", return_value=fake), \
+                unittest.mock.patch.object(ringer_pid, "_nt_process_start_time", return_value=None):
             self.assertIsNone(ringer_pid._windows_process_start_time(4242))
 
     def _fake_dlls(self, kernel32, ntdll=None):
@@ -243,6 +267,31 @@ class WindowsStartTimeSeamTests(unittest.TestCase):
         broken_nt.NtQuerySystemInformation.return_value = -1073741823  # 0xC0000001
         with self._fake_dlls(denied, broken_nt):
             self.assertIsNone(ringer_pid._windows_process_start_time(os.getpid()))
+
+    def test_process_table_larger_than_the_first_buffer_is_grown_into(self) -> None:
+        # A tiny first buffer forces the real kernel to answer
+        # STATUS_INFO_LENGTH_MISMATCH, so the growth loop runs for real.
+        own = os.getpid()
+        expected = ringer_pid._nt_process_start_time(own)
+        real_nt = ctypes.WinDLL("ntdll")
+        real_nt.NtQuerySystemInformation.restype = ctypes.c_long
+        real_nt.NtQuerySystemInformation.argtypes = [
+            ctypes.c_ulong, ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(ctypes.c_ulong),
+        ]
+        spy = unittest.mock.MagicMock()
+        spy.NtQuerySystemInformation.side_effect = real_nt.NtQuerySystemInformation
+        with self._fake_dlls(unittest.mock.MagicMock(), spy):
+            got = ringer_pid._nt_process_start_time(own, initial_size=4096)
+        self.assertIsNotNone(got)
+        self.assertLess(abs(got - expected), 1e-3)
+        self.assertGreaterEqual(spy.NtQuerySystemInformation.call_count, 2)
+
+    def test_permanent_length_mismatch_gives_up_as_none(self) -> None:
+        stuck = unittest.mock.MagicMock()
+        stuck.NtQuerySystemInformation.return_value = -1073741820  # 0xC0000004
+        with self._fake_dlls(unittest.mock.MagicMock(), stuck):
+            self.assertIsNone(ringer_pid._nt_process_start_time(os.getpid(), initial_size=4096))
+        self.assertEqual(8, stuck.NtQuerySystemInformation.call_count)
 
     def test_unknown_pid_in_the_process_table_is_none(self) -> None:
         self.assertIsNone(ringer_pid._nt_process_start_time(0x7FFFFFF0))
@@ -314,28 +363,44 @@ class ActiveRunsStartTimeTests(unittest.TestCase):
         self.assertEqual(["odd"], list(ringer.read_active_runs()))
 
     def test_malformed_pid_start_values_keep_a_live_run_and_are_not_written(self) -> None:
-        for bad in (float("nan"), float("inf"), float("-inf"), 0, -1, True, "x"):
+        for bad in (float("nan"), float("inf"), float("-inf"), 0, -1, True, "x", 10**400, -(10**400)):
             with self.subTest(bad=bad):
                 self.write({"live": {"pid": os.getpid(), "pid_start": bad, "workdir": "/w"}})
                 runs = ringer.read_active_runs()
                 self.assertEqual(["live"], list(runs))
                 self.assertNotIn("pid_start", runs["live"])
 
+    def test_overflowing_pid_start_in_raw_json_does_not_break_read_or_register(self) -> None:
+        big = "1" + "0" * 400
+        self.home.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(
+            '{"huge": {"pid": %d, "pid_start": %s, "workdir": "/w"}}' % (os.getpid(), big),
+            encoding="utf-8",
+        )
+        runs = ringer.read_active_runs()
+        self.assertEqual(["huge"], list(runs))
+        self.assertNotIn("pid_start", runs["huge"])
+        ringer.register_active_run("r1", "id", "name", Path(self.tmp.name))
+        self.assertIn("r1", ringer.read_active_runs())
+
     @unittest.skipUnless(HAS_START_TIME, "no start-time source on this platform")
     def test_register_records_pid_boot_when_available(self) -> None:
-        with unittest.mock.patch.object(ringer, "process_boot_id", return_value="boot-a"),                 unittest.mock.patch.object(ringer_pid, "process_boot_id", return_value="boot-a"):
+        with unittest.mock.patch.object(ringer, "process_boot_id", return_value="boot-a"), \
+                unittest.mock.patch.object(ringer_pid, "process_boot_id", return_value="boot-a"):
             ringer.register_active_run("r1", "id", "name", Path(self.tmp.name))
         entry = json.loads(self.path.read_text(encoding="utf-8"))["r1"]
         self.assertEqual("boot-a", entry["pid_boot"])
 
     def test_entry_from_a_previous_boot_is_pruned(self) -> None:
         self.write({"old": {"pid": os.getpid(), "pid_start": 123.0, "pid_boot": "boot-a", "workdir": "/w"}})
-        with unittest.mock.patch.object(ringer_pid, "process_start_time", return_value=123.0),                 unittest.mock.patch.object(ringer_pid, "process_boot_id", return_value="boot-b"):
+        with unittest.mock.patch.object(ringer_pid, "process_start_time", return_value=123.0), \
+                unittest.mock.patch.object(ringer_pid, "process_boot_id", return_value="boot-b"):
             self.assertEqual({}, ringer.read_active_runs())
 
     def test_prune_keeps_pid_boot_on_surviving_entries(self) -> None:
         self.write({"ok": {"pid": os.getpid(), "pid_start": 123.0, "pid_boot": "boot-a", "workdir": "/w"}})
-        with unittest.mock.patch.object(ringer_pid, "process_start_time", return_value=123.0),                 unittest.mock.patch.object(ringer_pid, "process_boot_id", return_value="boot-a"):
+        with unittest.mock.patch.object(ringer_pid, "process_start_time", return_value=123.0), \
+                unittest.mock.patch.object(ringer_pid, "process_boot_id", return_value="boot-a"):
             self.assertEqual("boot-a", ringer.read_active_runs()["ok"]["pid_boot"])
 
 
@@ -373,13 +438,34 @@ class NudgeHookStartTimeTests(unittest.TestCase):
         )
         self.assertEqual(["a", "b", "c", "d", "e"], sorted(self.hook.read_live_active_runs(self.home)))
 
+    def test_hook_keeps_live_runs_with_an_overflowing_pid_start(self) -> None:
+        path = self.home / "active-runs.json"
+        big = "1" + "0" * 400
+        path.write_text(
+            '{"a": {"pid": %d, "pid_start": %s}, "b": {"pid": %d, "pid_start": -%s}}'
+            % (os.getpid(), big, os.getpid(), big),
+            encoding="utf-8",
+        )
+        self.assertEqual(["a", "b"], sorted(self.hook.read_live_active_runs(self.home)))
+
+    def test_hook_checks_the_boot_id_even_without_a_pid_start(self) -> None:
+        # Same as prune: an entry whose pid_start was dropped keeps its pid_boot.
+        path = self.home / "active-runs.json"
+        path.write_text(json.dumps({
+            "old": {"pid": os.getpid(), "pid_boot": "boot-a"},
+            "same": {"pid": os.getpid(), "pid_boot": "boot-b"},
+        }), encoding="utf-8")
+        with unittest.mock.patch.object(ringer_pid, "process_boot_id", return_value="boot-b"):
+            self.assertEqual(["same"], sorted(self.hook.read_live_active_runs(self.home)))
+
     def test_hook_drops_a_run_from_a_previous_boot(self) -> None:
         path = self.home / "active-runs.json"
         path.write_text(json.dumps({
             "old": {"pid": os.getpid(), "pid_start": 123.0, "pid_boot": "boot-a"},
             "same": {"pid": os.getpid(), "pid_start": 123.0, "pid_boot": "boot-b"},
         }), encoding="utf-8")
-        with unittest.mock.patch.object(ringer_pid, "process_start_time", return_value=123.0),                 unittest.mock.patch.object(ringer_pid, "process_boot_id", return_value="boot-b"):
+        with unittest.mock.patch.object(ringer_pid, "process_start_time", return_value=123.0), \
+                unittest.mock.patch.object(ringer_pid, "process_boot_id", return_value="boot-b"):
             self.assertEqual(["same"], sorted(self.hook.read_live_active_runs(self.home)))
 
 

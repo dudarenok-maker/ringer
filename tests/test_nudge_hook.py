@@ -295,7 +295,7 @@ class NudgeHookTests(unittest.TestCase):
         real_probe = hook.pid_is_alive
         registered = []
 
-        def probe_then_register(pid):
+        def probe_then_register(pid, *probe_args):
             if not registered:
                 code = (
                     "import sys\n"
@@ -320,7 +320,7 @@ class NudgeHookTests(unittest.TestCase):
                 )
                 self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
                 registered.append(True)
-            return real_probe(pid)
+            return real_probe(pid, *probe_args)
 
         with unittest.mock.patch.object(hook, "pid_is_alive", probe_then_register):
             hook.read_live_active_runs(self.ringer_home)

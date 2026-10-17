@@ -93,11 +93,8 @@ def read_live_active_runs(home: Path) -> dict[str, dict[str, Any]]:
     for run_id, entry in raw.items():
         if not isinstance(entry, dict):
             continue
-        # One-arg call when no start time was recorded (legacy entries).
-        probe_args = (entry.get("pid"),)
-        if "pid_start" in entry:
-            probe_args += (entry["pid_start"], entry.get("pid_boot"))
-        if pid_is_alive(*probe_args):
+        # Legacy entries carry neither key: both read as None (pid-only check).
+        if pid_is_alive(entry.get("pid"), entry.get("pid_start"), entry.get("pid_boot")):
             live[str(run_id)] = entry
     return live
 
