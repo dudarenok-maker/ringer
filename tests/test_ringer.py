@@ -50,13 +50,13 @@ class RingerCliTests(unittest.TestCase):
 
     def write_config(self, engines: dict[str, list[str]], *, port: int = 18787) -> None:
         lines = [
-            f'state_dir = "{self.state_dir}"',
+            f'state_dir = "{self.state_dir.as_posix()}"',
             f"dashboard_port_base = {port}",
             "allow_full_access = false",
             "",
             "[eval]",
             'backend = "jsonl"',
-            f'jsonl_path = "{self.jsonl_path}"',
+            f'jsonl_path = "{self.jsonl_path.as_posix()}"',
             "",
         ]
         for name, args_template in engines.items():
@@ -109,9 +109,7 @@ class RingerCliTests(unittest.TestCase):
         ]
         if no_dashboard:
             cmd.append("--no-dashboard")
-        env = os.environ.copy()
-        env["PYTHONDONTWRITEBYTECODE"] = "1"
-        env["RINGER_NO_SELF_UPDATE"] = "1"
+        env = self.isolated_env()
         return subprocess.run(
             cmd,
             cwd=ROOT,
@@ -122,6 +120,21 @@ class RingerCliTests(unittest.TestCase):
             timeout=timeout,
             check=False,
         )
+
+    def isolated_env(self) -> dict[str, str]:
+        env = os.environ.copy()
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        env["RINGER_NO_SELF_UPDATE"] = "1"
+        env["RINGER_NO_CATALOG_REFRESH"] = "1"
+        env["RINGER_NO_HUD"] = "1"
+        # Keep active-runs.json and any config lookup off the developer's real home.
+        # Path.home() ignores HOME on Windows, so USERPROFILE is set too.
+        home = self.root / "home"
+        env["HOME"] = str(home)
+        env["USERPROFILE"] = str(home)
+        env["XDG_CONFIG_HOME"] = str(home / ".config")
+        env["RINGER_HOME"] = str(home / ".ringer")
+        return env
 
     def read_rows(self, path: Path | None = None) -> list[dict[str, object]]:
         jsonl_path = path or self.jsonl_path
@@ -262,9 +275,7 @@ class RingerCliTests(unittest.TestCase):
             "--identity",
             "test-runner",
         ]
-        env = os.environ.copy()
-        env["PYTHONDONTWRITEBYTECODE"] = "1"
-        env["RINGER_NO_SELF_UPDATE"] = "1"
+        env = self.isolated_env()
         proc = subprocess.Popen(
             cmd,
             cwd=ROOT,
@@ -322,9 +333,7 @@ class RingerCliTests(unittest.TestCase):
             "--identity",
             "test-runner",
         ]
-        env = os.environ.copy()
-        env["PYTHONDONTWRITEBYTECODE"] = "1"
-        env["RINGER_NO_SELF_UPDATE"] = "1"
+        env = self.isolated_env()
         proc = subprocess.Popen(
             cmd,
             cwd=ROOT,

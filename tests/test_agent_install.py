@@ -23,6 +23,7 @@ class AgentInstallTests(unittest.TestCase):
     def run_cli(self, *args: str, cwd: Path = ROOT) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env["HOME"] = str(self.home)
+        env["USERPROFILE"] = str(self.home)
         env["RINGER_HOME"] = str(self.ringer_home)
         return subprocess.run(
             [sys.executable, "ringer.py", *args],

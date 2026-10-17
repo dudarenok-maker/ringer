@@ -6329,7 +6329,16 @@ def serve_artifact_path(handler: BaseHTTPRequestHandler, artifact_root: Path, pa
 
 
 class ReusableThreadingHTTPServer(ThreadingHTTPServer):
-    allow_reuse_address = True
+    # POSIX: SO_REUSEADDR only lets a restart rebind through TIME_WAIT. On
+    # Windows the same flag lets a second socket bind a port that is already
+    # LISTENING, so every missed liveness probe stacked another HUD on :8700.
+    # Windows gets an exclusive bind instead.
+    allow_reuse_address = sys.platform != "win32"
+
+    def server_bind(self) -> None:
+        if sys.platform == "win32":
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
 
 class PersistentHudServer:
@@ -6588,7 +6597,7 @@ class Dashboard:
         last_error: OSError | None = None
         for port in range(self.preferred_port, self.preferred_port + 50):
             try:
-                self.httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+                self.httpd = ReusableThreadingHTTPServer(("127.0.0.1", port), Handler)
             except OSError as exc:
                 last_error = exc
                 continue
@@ -11951,6 +11960,8 @@ def ensure_hud_running(config: AppConfig, *, open_browser: bool) -> None:
     The human should never have to remember a second command to watch the
     fight: if no hud answers on the configured port, spawn one detached.
     """
+    if os.environ.get("RINGER_NO_HUD") == "1":
+        return
     port = config.hud_port
     url = f"http://127.0.0.1:{port}"
     already_alive = hud_is_alive(port)
@@ -11999,7 +12010,20 @@ def run_persistent_hud(config: AppConfig, *, port: int | None, open_viewer: bool
     repo_dir = Path(__file__).resolve().parent
     running_head = current_repo_head(repo_dir)
     server.update_status = self_update_dashboard_status(config.state_dir, repo_dir)
-    server.start()
+    try:
+        server.start()
+    except RuntimeError as exc:
+        # Lost a bind race against a sibling spawn (both probed "dead"): the
+        # winner is the HUD, so this is success (before, main()'s catch-all
+        # printed "could not start Ringside..." and exited 2).
+        if hud_is_alive(chosen_port):
+            url = f"http://127.0.0.1:{chosen_port}"
+            print(f"Ringside is already running: {url}")
+            if open_viewer:
+                open_in_browser(url)
+            return 0
+        print(str(exc), file=sys.stderr)
+        return 1
     start_hud_update_maintenance(
         config,
         server,

@@ -222,7 +222,9 @@ class LintManifestTests(unittest.TestCase):
             home.mkdir()
             (home / "report.md").write_text("done\n", encoding="utf-8")
             previous_home = os.environ.get("HOME")
+            previous_profile = os.environ.get("USERPROFILE")
             os.environ["HOME"] = str(home)
+            os.environ["USERPROFILE"] = str(home)
             try:
                 task = TaskSpec(
                     key="one",
@@ -236,6 +238,10 @@ class LintManifestTests(unittest.TestCase):
                     os.environ.pop("HOME", None)
                 else:
                     os.environ["HOME"] = previous_home
+                if previous_profile is None:
+                    os.environ.pop("USERPROFILE", None)
+                else:
+                    os.environ["USERPROFILE"] = previous_profile
         self.assertTrue(result.ok, result.raw_output_excerpt)
         self.assertEqual((), result.missing_files)
 

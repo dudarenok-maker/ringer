@@ -51,6 +51,7 @@ class IdentityEvidenceTests(unittest.TestCase):
         self.old_environ = os.environ.copy()
         self.addCleanup(self.restore_environ)
         os.environ["HOME"] = str(self.root / "home")
+        os.environ["USERPROFILE"] = str(self.root / "home")
         os.environ["RINGER_HOME"] = str(self.root / "ringer-home")
         self.registry = self.root / "model-identity.toml"
         self.registry.write_text(

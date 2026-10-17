@@ -2,10 +2,12 @@
 """Persistent HUD opener behavior."""
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -35,6 +37,13 @@ def config(root: Path) -> AppConfig:
 
 
 class HudSingleTabTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # An exported RINGER_NO_HUD=1 would make ensure_hud_running return early.
+        patcher = mock.patch.dict(os.environ)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop("RINGER_NO_HUD", None)
+
     def test_already_alive_does_not_open_browser(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             opened: list[str] = []
