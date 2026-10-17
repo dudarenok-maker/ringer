@@ -2,6 +2,7 @@
 """Process start-time guard against pid reuse in active-runs.json."""
 from __future__ import annotations
 
+import ctypes
 import importlib.util
 import json
 import os
@@ -78,6 +79,48 @@ class StartTimeProbeTests(unittest.TestCase):
             self.assertIsNone(ringer_pid.process_start_time(os.getpid()))
             self.assertTrue(ringer_pid.pid_is_alive(os.getpid(), 1.0))
 
+def spawn_sleeper(test: unittest.TestCase) -> subprocess.Popen:
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+
+    def reap() -> None:
+        proc.kill()
+        proc.wait()
+
+    test.addCleanup(reap)
+    return proc
+
+
+def clock_now_in_probe_base() -> float | None:
+    """Now, in the time base process_start_time() reports (independent of it)."""
+    if sys.platform == "win32":
+        return time.time() + 11644473600.0  # seconds from 1601 to the Unix epoch
+    if sys.platform.startswith("linux"):
+        with open("/proc/uptime", encoding="utf-8") as fh:
+            return float(fh.read().split()[0])
+    return None
+
+
+@unittest.skipUnless(HAS_START_TIME, "no start-time source on this platform")
+class StartTimeIsRealTests(unittest.TestCase):
+    """Pins the probe to a real clock and to real process identity: a probe that
+    reads the wrong field or returns a constant must fail here."""
+
+    def test_just_spawned_child_started_within_seconds_of_now(self) -> None:
+        proc = spawn_sleeper(self)
+        start = ringer_pid.process_start_time(proc.pid)
+        now = clock_now_in_probe_base()
+        self.assertIsNotNone(start)
+        self.assertLess(abs(now - start), 5.0)
+
+    def test_a_different_process_is_not_the_recorded_one(self) -> None:
+        a = spawn_sleeper(self)
+        start_a = ringer_pid.process_start_time(a.pid)
+        time.sleep(1.2)
+        b = spawn_sleeper(self)
+        start_b = ringer_pid.process_start_time(b.pid)
+        self.assertFalse(ringer_pid.pid_is_alive(b.pid, start_a))
+        self.assertTrue(ringer_pid.pid_is_alive(b.pid, start_b))
+
 
 class LinuxStatParseTests(unittest.TestCase):
     def parse(self, text: str) -> float | None:
@@ -96,21 +139,126 @@ class LinuxStatParseTests(unittest.TestCase):
         self.assertIsNone(self.parse("42 (x) S 1 2"))
 
 
+class CoerceStartTimeTests(unittest.TestCase):
+    def test_usable_values_pass_through(self) -> None:
+        self.assertEqual(5.5, ringer_pid.coerce_start_time(5.5))
+        self.assertEqual(5.0, ringer_pid.coerce_start_time(5))
+
+    def test_unusable_values_read_as_absent(self) -> None:
+        for bad in (True, False, float("nan"), float("inf"), float("-inf"), 0, 0.0, -1, "x", None, [1], {}):
+            with self.subTest(bad=bad):
+                self.assertIsNone(ringer_pid.coerce_start_time(bad))
+
+    def test_unusable_start_time_never_marks_a_live_pid_dead(self) -> None:
+        for bad in (True, float("nan"), float("inf"), float("-inf"), 0, -1, "x"):
+            with self.subTest(bad=bad):
+                self.assertTrue(ringer_pid.pid_is_alive(os.getpid(), bad))
+
+
+class BootIdTests(unittest.TestCase):
+    def alive(self, recorded, current) -> bool:
+        with unittest.mock.patch.object(ringer_pid, "process_boot_id", return_value=current):
+            return ringer_pid.pid_is_alive(os.getpid(), None, recorded)
+
+    def test_a_different_boot_reads_dead(self) -> None:
+        self.assertFalse(self.alive("boot-a", "boot-b"))
+
+    def test_the_same_boot_reads_alive(self) -> None:
+        self.assertTrue(self.alive("boot-a", "boot-a"))
+
+    def test_unreadable_current_boot_is_fail_open(self) -> None:
+        self.assertTrue(self.alive("boot-a", None))
+
+    def test_no_recorded_boot_is_pid_only(self) -> None:
+        self.assertTrue(self.alive(None, "boot-b"))
+
+    def test_boot_id_is_read_and_stripped(self) -> None:
+        with unittest.mock.patch("builtins.open", unittest.mock.mock_open(read_data="abc-123\n")):
+            self.assertEqual("abc-123", ringer_pid._read_boot_id())
+
+    def test_unreadable_boot_id_file_is_none(self) -> None:
+        with unittest.mock.patch("builtins.open", side_effect=OSError):
+            self.assertIsNone(ringer_pid._read_boot_id())
+
+    def test_no_boot_id_on_windows(self) -> None:
+        if sys.platform != "win32":
+            self.skipTest("Windows only")
+        self.assertIsNone(ringer_pid.process_boot_id())
+
+
 @unittest.skipUnless(sys.platform == "win32", "Windows ctypes path")
 class WindowsStartTimeSeamTests(unittest.TestCase):
     def test_get_process_times_failure_returns_none_and_closes_handle(self) -> None:
         fake = unittest.mock.MagicMock()
         fake.OpenProcess.return_value = 99
         fake.GetProcessTimes.return_value = 0
-        with unittest.mock.patch("ctypes.WinDLL", return_value=fake):
+        with unittest.mock.patch("ctypes.WinDLL", return_value=fake),                 unittest.mock.patch.object(ringer_pid, "_nt_process_start_time", return_value=None):
             self.assertIsNone(ringer_pid._windows_process_start_time(4242))
         fake.CloseHandle.assert_called_once_with(99)
 
     def test_open_process_failure_returns_none(self) -> None:
         fake = unittest.mock.MagicMock()
         fake.OpenProcess.return_value = None
-        with unittest.mock.patch("ctypes.WinDLL", return_value=fake):
+        with unittest.mock.patch("ctypes.WinDLL", return_value=fake),                 unittest.mock.patch.object(ringer_pid, "_nt_process_start_time", return_value=None):
             self.assertIsNone(ringer_pid._windows_process_start_time(4242))
+
+    def _fake_dlls(self, kernel32, ntdll=None):
+        real = ctypes.WinDLL
+
+        def factory(name, *args, **kwargs):
+            if name == "kernel32":
+                return kernel32
+            if name == "ntdll" and ntdll is not None:
+                return ntdll
+            return real(name, *args, **kwargs)
+
+        return unittest.mock.patch("ctypes.WinDLL", side_effect=factory)
+
+    def test_system_process_start_time_is_readable_even_if_not_openable(self) -> None:
+        # pid 4 (System) refuses OpenProcess for a non-elevated user; the
+        # handle-free path must still answer.
+        self.assertIsNotNone(ringer_pid.process_start_time(4))
+
+    def test_nt_path_matches_get_process_times(self) -> None:
+        own = os.getpid()
+        via_handle = ringer_pid._windows_process_start_time(own)
+        via_nt = ringer_pid._nt_process_start_time(own)
+        self.assertIsNotNone(via_nt)
+        self.assertLess(abs(via_handle - via_nt), 1e-3)
+
+    def test_open_process_failure_falls_back_to_the_process_table(self) -> None:
+        own = os.getpid()
+        expected = ringer_pid._windows_process_start_time(own)
+        denied = unittest.mock.MagicMock()
+        denied.OpenProcess.return_value = None
+        with self._fake_dlls(denied):
+            got = ringer_pid._windows_process_start_time(own)
+        self.assertIsNotNone(got)
+        self.assertLess(abs(got - expected), 1e-3)
+
+    def test_open_process_and_process_table_both_failing_is_none(self) -> None:
+        denied = unittest.mock.MagicMock()
+        denied.OpenProcess.return_value = None
+        broken_nt = unittest.mock.MagicMock()
+        broken_nt.NtQuerySystemInformation.return_value = -1073741823  # 0xC0000001
+        with self._fake_dlls(denied, broken_nt):
+            self.assertIsNone(ringer_pid._windows_process_start_time(os.getpid()))
+
+    def test_unknown_pid_in_the_process_table_is_none(self) -> None:
+        self.assertIsNone(ringer_pid._nt_process_start_time(0x7FFFFFF0))
+
+    def test_unopenable_live_pid_with_a_dead_runs_start_reads_dead(self) -> None:
+        # The ghost this guard exists for, with a reuser we cannot open
+        # (svchost-style): a live protected pid, a dead run's recorded start.
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        handle = kernel32.OpenProcess(0x1000, False, 4)
+        if handle:
+            kernel32.CloseHandle(ctypes.c_void_p(handle))
+            self.skipTest("elevated runner can open System; no unopenable pid to use")
+        live = ringer_pid.process_start_time(4)
+        self.assertTrue(ringer_pid.pid_is_alive(4, live))
+        self.assertFalse(ringer_pid.pid_is_alive(4, live - 3600.0))
 
     def test_no_handle_leak(self) -> None:
         from test_ringer_pid import process_handle_count
@@ -165,6 +313,31 @@ class ActiveRunsStartTimeTests(unittest.TestCase):
         self.write({"odd": {"pid": os.getpid(), "pid_start": "soon", "workdir": "/w"}})
         self.assertEqual(["odd"], list(ringer.read_active_runs()))
 
+    def test_malformed_pid_start_values_keep_a_live_run_and_are_not_written(self) -> None:
+        for bad in (float("nan"), float("inf"), float("-inf"), 0, -1, True, "x"):
+            with self.subTest(bad=bad):
+                self.write({"live": {"pid": os.getpid(), "pid_start": bad, "workdir": "/w"}})
+                runs = ringer.read_active_runs()
+                self.assertEqual(["live"], list(runs))
+                self.assertNotIn("pid_start", runs["live"])
+
+    @unittest.skipUnless(HAS_START_TIME, "no start-time source on this platform")
+    def test_register_records_pid_boot_when_available(self) -> None:
+        with unittest.mock.patch.object(ringer, "process_boot_id", return_value="boot-a"),                 unittest.mock.patch.object(ringer_pid, "process_boot_id", return_value="boot-a"):
+            ringer.register_active_run("r1", "id", "name", Path(self.tmp.name))
+        entry = json.loads(self.path.read_text(encoding="utf-8"))["r1"]
+        self.assertEqual("boot-a", entry["pid_boot"])
+
+    def test_entry_from_a_previous_boot_is_pruned(self) -> None:
+        self.write({"old": {"pid": os.getpid(), "pid_start": 123.0, "pid_boot": "boot-a", "workdir": "/w"}})
+        with unittest.mock.patch.object(ringer_pid, "process_start_time", return_value=123.0),                 unittest.mock.patch.object(ringer_pid, "process_boot_id", return_value="boot-b"):
+            self.assertEqual({}, ringer.read_active_runs())
+
+    def test_prune_keeps_pid_boot_on_surviving_entries(self) -> None:
+        self.write({"ok": {"pid": os.getpid(), "pid_start": 123.0, "pid_boot": "boot-a", "workdir": "/w"}})
+        with unittest.mock.patch.object(ringer_pid, "process_start_time", return_value=123.0),                 unittest.mock.patch.object(ringer_pid, "process_boot_id", return_value="boot-a"):
+            self.assertEqual("boot-a", ringer.read_active_runs()["ok"]["pid_boot"])
+
 
 class NudgeHookStartTimeTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -189,6 +362,25 @@ class NudgeHookStartTimeTests(unittest.TestCase):
         runs = self.hook.read_live_active_runs(self.home)
         self.assertEqual(["legacy", "live"], sorted(runs))
         self.assertEqual(before, path.read_bytes())
+
+    def test_hook_keeps_live_runs_with_malformed_pid_start(self) -> None:
+        path = self.home / "active-runs.json"
+        path.write_text(
+            '{"a": {"pid": %d, "pid_start": NaN}, "b": {"pid": %d, "pid_start": Infinity},'
+            ' "c": {"pid": %d, "pid_start": 0}, "d": {"pid": %d, "pid_start": -1},'
+            ' "e": {"pid": %d, "pid_start": true}}' % ((os.getpid(),) * 5),
+            encoding="utf-8",
+        )
+        self.assertEqual(["a", "b", "c", "d", "e"], sorted(self.hook.read_live_active_runs(self.home)))
+
+    def test_hook_drops_a_run_from_a_previous_boot(self) -> None:
+        path = self.home / "active-runs.json"
+        path.write_text(json.dumps({
+            "old": {"pid": os.getpid(), "pid_start": 123.0, "pid_boot": "boot-a"},
+            "same": {"pid": os.getpid(), "pid_start": 123.0, "pid_boot": "boot-b"},
+        }), encoding="utf-8")
+        with unittest.mock.patch.object(ringer_pid, "process_start_time", return_value=123.0),                 unittest.mock.patch.object(ringer_pid, "process_boot_id", return_value="boot-b"):
+            self.assertEqual(["same"], sorted(self.hook.read_live_active_runs(self.home)))
 
 
 if __name__ == "__main__":

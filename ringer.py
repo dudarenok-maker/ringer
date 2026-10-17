@@ -49,7 +49,7 @@ _RINGER_DIR = str(Path(__file__).resolve().parent)
 if _RINGER_DIR not in sys.path:
     sys.path.insert(0, _RINGER_DIR)
 try:
-    from ringer_pid import pid_is_alive, process_start_time
+    from ringer_pid import coerce_start_time, pid_is_alive, process_boot_id, process_start_time
 except ModuleNotFoundError as _exc:  # pragma: no cover - exercised via subprocess in tests.
     if _exc.name != "ringer_pid":
         raise
@@ -3187,10 +3187,11 @@ def _prune_active_runs(runs: dict[str, dict[str, Any]]) -> dict[str, dict[str, A
             pid_int = int(pid)
         except (TypeError, ValueError):
             continue
-        pid_start = entry.get("pid_start")
-        if isinstance(pid_start, bool) or not isinstance(pid_start, (int, float)):
-            pid_start = None  # legacy / malformed: pid-only liveness
-        if not pid_is_alive(pid_int, pid_start):
+        pid_start = coerce_start_time(entry.get("pid_start"))  # legacy / malformed: None, pid-only
+        pid_boot = entry.get("pid_boot")
+        if not isinstance(pid_boot, str) or not pid_boot:
+            pid_boot = None
+        if not pid_is_alive(pid_int, pid_start, pid_boot):
             continue
         pruned[run_id] = {
             "pid": pid_int,
@@ -3201,6 +3202,8 @@ def _prune_active_runs(runs: dict[str, dict[str, Any]]) -> dict[str, dict[str, A
         }
         if pid_start is not None:
             pruned[run_id]["pid_start"] = pid_start
+        if pid_boot is not None:
+            pruned[run_id]["pid_boot"] = pid_boot
     return pruned
 
 
@@ -3300,6 +3303,9 @@ def register_active_run(
         pid_start = process_start_time(run_pid)
         if pid_start is not None:
             runs[run_id]["pid_start"] = pid_start
+            pid_boot = process_boot_id()
+            if pid_boot is not None:
+                runs[run_id]["pid_boot"] = pid_boot
         _write_active_runs(runs)
 
 

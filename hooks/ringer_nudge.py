@@ -44,7 +44,7 @@ def ringer_home() -> Path:
     return Path.home() / ".ringer"
 
 
-def pid_is_alive(pid: Any, start_time: Any = None) -> bool:
+def pid_is_alive(pid: Any, start_time: Any = None, boot_id: Any = None) -> bool:
     try:
         parsed = int(pid)
     except (TypeError, ValueError):
@@ -62,10 +62,9 @@ def pid_is_alive(pid: Any, start_time: Any = None) -> bool:
     from ringer_pid import pid_is_alive as ringer_pid_is_alive
 
     # A recorded process start time (entry["pid_start"]) tells a reused pid
-    # from the run's own process; absent or malformed means pid-only.
-    if isinstance(start_time, bool) or not isinstance(start_time, (int, float)):
-        start_time = None
-    return ringer_pid_is_alive(parsed, start_time)
+    # from the run's own process; absent or malformed means pid-only (the
+    # coercion lives in ringer_pid.pid_is_alive).
+    return ringer_pid_is_alive(parsed, start_time, boot_id if isinstance(boot_id, str) else None)
 
 
 def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
@@ -97,7 +96,7 @@ def read_live_active_runs(home: Path) -> dict[str, dict[str, Any]]:
         # One-arg call when no start time was recorded (legacy entries).
         probe_args = (entry.get("pid"),)
         if "pid_start" in entry:
-            probe_args += (entry["pid_start"],)
+            probe_args += (entry["pid_start"], entry.get("pid_boot"))
         if pid_is_alive(*probe_args):
             live[str(run_id)] = entry
     return live
