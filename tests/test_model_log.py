@@ -626,6 +626,54 @@ class RealRegistryDefaultsTests(unittest.TestCase):
         }
         self.assertEqual(len(keys), 3)
 
+    def test_cline_free_default_is_mimo_and_step_5_preview_is_kept(self) -> None:
+        # The free lane moved off step-5-preview (retired 2026-10-15) onto
+        # MiMo-V2.6-Flash. Cline's picker shows only the model name, no lab;
+        # the lab is provisional, from OpenRouter's catalog org segment
+        # (xiaomi/mimo-v2.6-flash) per docs/TAXONOMY.md, and was not checked
+        # against a model card, so confidence must stay below "verified"; the
+        # retired entry stays registered (append-only).
+        registry = self._real_registry()
+        slug = "cline-free/mimo-v2.6-flash"
+        self.assertEqual(registry.defaults.get("cline-free"), slug)
+        identity = registry.resolve("cline-free", slug)
+        self.assertFalse(identity.unregistered)
+        self.assertEqual(identity.model_display, "MiMo-V2.6-Flash")
+        self.assertEqual(identity.lab, "Xiaomi")
+        self.assertEqual(identity.access, "Cline free tier")
+        self.assertEqual(identity.harness, "Cline CLI")
+        self.assertEqual(identity.confidence, "unverified")
+        self.assertEqual(identity.last_verified, "2026-10-17")
+        old = registry.resolve("cline-free", "cline-free/step-5-preview")
+        self.assertFalse(old.unregistered)
+        self.assertEqual(old.model_display, "Step 5 Preview")
+
+    def test_cline_free_every_era_keeps_its_identity(self) -> None:
+        # Append-only: all four eras of the free lane stay registered with
+        # their own display/lab/access/confidence, so a historical row never
+        # re-attributes (e.g. step-5-preview must stay StepFun, not Xiaomi).
+        registry = self._real_registry()
+        self.assertEqual(
+            registry.defaults.get("cline-free"), "cline-free/mimo-v2.6-flash"
+        )
+        for slug, display, lab, confidence in (
+            ("deepseek/deepseek-v4-flash", "DeepSeek V4 Flash", "DeepSeek",
+             "unverified"),
+            ("deepseek/deepseek-v4.1-flash", "DeepSeek V4.1 Flash", "DeepSeek",
+             "unverified"),
+            ("cline-free/step-5-preview", "Step 5 Preview", "StepFun",
+             "unverified"),
+            ("cline-free/mimo-v2.6-flash", "MiMo-V2.6-Flash", "Xiaomi",
+             "unverified"),
+        ):
+            with self.subTest(slug=slug):
+                identity = registry.resolve("cline-free", slug)
+                self.assertFalse(identity.unregistered)
+                self.assertEqual(identity.model_display, display)
+                self.assertEqual(identity.lab, lab)
+                self.assertEqual(identity.access, "Cline free tier")
+                self.assertEqual(identity.confidence, confidence)
+
     def test_pass_lane_rows_land_in_their_own_named_scoreboard_rows(self) -> None:
         registry = self._real_registry()
         lanes = (
@@ -661,16 +709,17 @@ class RealRegistryDefaultsTests(unittest.TestCase):
 
     def test_current_claude_and_cline_free_models_resolve_registered(self) -> None:
         # The claude lane now runs claude-sonnet-5-5 and cline-free runs
-        # cline-free/step-5-preview (open-engine#102). Unregistered, each
+        # cline-free/mimo-v2.6-flash (was step-5-preview, open-engine#102,
+        # retired 2026-10-15). Unregistered, each
         # resolved as lab "(unverified)" / confidence "fallback". The defaults
         # must point at the current keys; the older entries stay (append-only).
         registry = self._real_registry()
         for engine, slug, lab, display, access, old_slug in (
             ("claude", "claude-sonnet-5-5", "Anthropic", "Claude Sonnet 5.5",
              "Max 20x plan", "claude-sonnet-5"),
-            ("cline-free", "cline-free/step-5-preview", "StepFun",
-             "Step 5 Preview", "Cline free tier",
-             "deepseek/deepseek-v4.1-flash"),
+            ("cline-free", "cline-free/mimo-v2.6-flash", "Xiaomi",
+             "MiMo-V2.6-Flash", "Cline free tier",
+             "cline-free/step-5-preview"),
         ):
             with self.subTest(engine=engine):
                 self.assertEqual(registry.defaults.get(engine), slug)
