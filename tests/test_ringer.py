@@ -50,13 +50,13 @@ class RingerCliTests(unittest.TestCase):
 
     def write_config(self, engines: dict[str, list[str]], *, port: int = 18787) -> None:
         lines = [
-            f'state_dir = "{self.state_dir}"',
+            f'state_dir = "{self.state_dir.as_posix()}"',
             f"dashboard_port_base = {port}",
             "allow_full_access = false",
             "",
             "[eval]",
             'backend = "jsonl"',
-            f'jsonl_path = "{self.jsonl_path}"',
+            f'jsonl_path = "{self.jsonl_path.as_posix()}"',
             "",
         ]
         for name, args_template in engines.items():
