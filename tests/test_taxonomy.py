@@ -66,6 +66,7 @@ class TaxonomyTests(unittest.TestCase):
         self.old_env = os.environ.copy()
         self.addCleanup(self.restore_env)
         os.environ["HOME"] = str(self.root / "home")
+        os.environ["USERPROFILE"] = str(self.root / "home")
         os.environ["RINGER_HOME"] = str(self.root / "ringer-home")
         self.registry_path = self.root / "model-identity.toml"
         self.registry_path.write_text(

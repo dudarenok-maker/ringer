@@ -33,6 +33,7 @@ class LogEndpointTests(unittest.TestCase):
         self.addCleanup(self.restore_env)
         self.root = Path(self.tmp.name)
         os.environ["HOME"] = str(self.root / "home")
+        os.environ["USERPROFILE"] = str(self.root / "home")
         os.environ["RINGER_HOME"] = str(self.root / "ringer-home")
         self.state_dir = self.root / "state"
         self.workdir = self.root / "work"

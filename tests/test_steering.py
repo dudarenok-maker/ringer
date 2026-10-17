@@ -310,7 +310,12 @@ class SteeringConfigAndDriverTests(unittest.TestCase):
             home = Path(temp_root)
             with mock.patch.dict(
                 os.environ,
-                {"HOME": str(home), "RINGER_STEERING_DIR": "~/env-steering"},
+                {
+                    "HOME": str(home),
+                    # expanduser reads USERPROFILE, not HOME, on Windows.
+                    "USERPROFILE": str(home),
+                    "RINGER_STEERING_DIR": "~/env-steering",
+                },
                 clear=True,
             ):
                 config = load_steering_config(
@@ -743,6 +748,7 @@ class SteeringMockEngineFunctionalTests(unittest.TestCase):
             env.update(
                 {
                     "HOME": str(home),
+                    "USERPROFILE": str(home),
                     "RINGER_HOME": str(ringer_home),
                     "XDG_CONFIG_HOME": str(root / "xdg-config"),
                 }
