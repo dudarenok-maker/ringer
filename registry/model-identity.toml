@@ -351,7 +351,7 @@ last_verified = 2026-09-19
 [engines.cline-free]
 harness = "Cline CLI"
 access = "Cline free tier"       # operator-confirmed 2026-08-18; hard daily quota
-default_model_key = "cline-free/step-5-preview"
+default_model_key = "cline-free/mimo-v2.6-flash"
 
 [engines.cline-free.models."deepseek/deepseek-v4-flash"]
 # ERA 1. SUPERSEDED 2026-09-19 by "deepseek/deepseek-v4.1-flash" below - kept
@@ -377,19 +377,29 @@ source = "live probe 2026-09-19: cline.exe -P cline -m deepseek/deepseek-v4.1-fl
 last_verified = 2026-09-19
 
 [engines.cline-free.models."cline-free/step-5-preview"]
-# ERA 3 (the default_model_key above, until a successor is registered). deepseek/deepseek-v4.1-flash
+# ERA 3. SUPERSEDED 2026-10-17 by "cline-free/mimo-v2.6-flash" below. deepseek/deepseek-v4.1-flash
 # -> cline-free/step-5-preview 2026-10-10 (open-engine#102): Cline moved the
 # former off its free tier (it now bills Cline Credits as a paid ClinePass
 # model), so the free lane was repointed at a model still on the free list.
 # RETIRED 2026-10-15: the free promotion for this model ended (every run
 # errors `Free model promotion ended`; evidence: open-engine lane logs,
-# open-engine#106). Kept for every run logged before then (append-only); the
-# successor free model is not yet registered.
+# open-engine#106). Kept for every run logged before then (append-only).
 display = "Step 5 Preview"
 lab = "StepFun"
 confidence = "unverified"   # lab per open-engine#102's description; the model card was not independently checked
 source = "open-engine#102 (live probe 2026-10-10: cline -P cline -m cline-free/step-5-preview returned PONG; description names it StepFun Step 5 Preview) and open-engine config/lanes.psd1"
 last_verified = 2026-10-10
+
+[engines.cline-free.models."cline-free/mimo-v2.6-flash"]
+# ERA 4 (the default_model_key above). cline-free/step-5-preview ->
+# cline-free/mimo-v2.6-flash 2026-10-17: the former's free promotion ended
+# 2026-10-15, so the free lane was repointed at MiMo-V2.6-Flash, the model
+# Cline's picker lists on its free tier (seen 2026-10-16).
+display = "MiMo-V2.6-Flash"
+lab = "Xiaomi"
+confidence = "unverified"   # lab per Cline's model-picker name; Xiaomi's own model card was not checked
+source = "Cline model picker 2026-10-16 (MiMo-V2.6-Flash on the free tier); Ringer bakeoff cline-free-model-bakeoff 2026-10-17 ran it twice via engine cline-free, both PASS; independent support: OpenRouter catalog snapshot (~/.ringer/openrouter-catalog.json, fetched 2026-10-16) lists xiaomi/mimo-v2.6-flash as \"Xiaomi: MiMo-V2.6-Flash\" (an aggregator listing, not a model card)"
+last_verified = 2026-10-17
 
 [engines.cline-glm]
 harness = "Cline CLI"
