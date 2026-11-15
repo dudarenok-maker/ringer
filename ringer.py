@@ -5303,7 +5303,14 @@ def inject_lanes_panel_into_ringside_html(html: str) -> str:
       function queuePausedBanner(payload) {
         const qp = payload?.queue_paused;
         if (!qp || typeof qp !== "object") return "";
-        const age = Number(qp.age_minutes);
+        // age_minutes is stamped by the producer, so it freezes the moment the
+        // producer stops; paused_at against the wall clock keeps ageing.
+        let age = Number(qp.age_minutes);
+        const pausedMs = Date.parse(typeof qp.paused_at === "string" ? qp.paused_at : "");
+        if (Number.isFinite(pausedMs)) {
+          const wallAge = (Date.now() - pausedMs) / 60000;
+          age = Number.isFinite(age) ? Math.max(age, wallAge) : wallAge;
+        }
         const warn = qp.corrupt === true || (Number.isFinite(age) && age >= QUEUE_PAUSED_WARN_MINUTES);
         let text;
         if (qp.corrupt === true) {

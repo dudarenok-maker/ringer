@@ -938,13 +938,22 @@ class LanesPanelBrowserBehaviorTests(unittest.TestCase):
         html = str(out["html"])
         self.assertIn("queue-paused-banner", html)
         self.assertIn(f"Queue paused · since {out['expectedSince']} · GPU swap · oe resume to restart", html)
-        self.assertNotIn("queue-paused-warn", html)
 
     def test_queue_paused_banner_warns_at_24_hours(self) -> None:
-        under = self.render_with_queue_paused("{ paused_at: '2026-11-14T09:05:00Z', reason: 'r', by: 'm', corrupt: false, age_minutes: 1439 }")
+        # paused_at is relative to now: the warn decision also reads the wall
+        # clock, so a fixed instant would drift into the warn range over time.
+        under = self.render_with_queue_paused("{ paused_at: new Date(Date.now() - 60000).toISOString(), reason: 'r', by: 'm', corrupt: false, age_minutes: 1439 }")
         self.assertNotIn("queue-paused-warn", str(under["html"]))
-        at = self.render_with_queue_paused("{ paused_at: '2026-11-14T09:05:00Z', reason: 'r', by: 'm', corrupt: false, age_minutes: 1440 }")
+        at = self.render_with_queue_paused("{ paused_at: new Date(Date.now() - 60000).toISOString(), reason: 'r', by: 'm', corrupt: false, age_minutes: 1440 }")
         self.assertIn("queue-paused-warn", str(at["html"]))
+
+    def test_queue_paused_warns_on_a_frozen_age_minutes_using_paused_at(self) -> None:
+        # age_minutes is stamped by the producer and freezes once it stops, so
+        # the warn decision must also look at the wall-clock age of paused_at.
+        out = self.render_with_queue_paused(
+            "{ paused_at: new Date(Date.now() - (2 * 1440 + 30) * 60000).toISOString(), reason: 'r', by: 'm', corrupt: false, age_minutes: 30 }"
+        )
+        self.assertIn("queue-paused-warn", str(out["html"]))
 
     def test_queue_paused_corrupt_flag_warns_without_a_time_or_reason(self) -> None:
         out = self.render_with_queue_paused("{ paused_at: null, reason: 'x', by: 'y', corrupt: true, age_minutes: null }")
