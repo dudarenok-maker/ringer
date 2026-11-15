@@ -5225,6 +5225,18 @@ def inject_lanes_panel_into_ringside_html(html: str) -> str:
       // degrade to a legible "unknown"/blank rather than throwing and taking
       // the whole render down with it (a single bad row used to freeze every
       // OTHER lane's chip on its last-known value, forever).
+      // "Mon D, HH:MM" in the viewer's local time. A bare time is ambiguous the
+      // moment a park outlasts today - cline-glm and cline-muse-local both
+      // routinely park multiple days out. "Mon 22" over MM/DD or DD/MM: both of
+      // those are genuinely ambiguous depending on the viewer's own locale
+      // conventions, a three-letter month name never is.
+      function localStamp(d) {
+        const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+        const hh = String(d.getHours()).padStart(2, "0");
+        const mm = String(d.getMinutes()).padStart(2, "0");
+        return `${MONTHS[d.getMonth()] ?? "?"} ${d.getDate()}, ${hh}:${mm}`;
+      }
+
       function laneDetail(lane) {
         switch (safeState(lane)) {
           case "running": return `running ${numberOrZero(lane.running_minutes)}m`;
@@ -5237,17 +5249,7 @@ def inject_lanes_panel_into_ringside_html(html: str) -> str:
             // verbatim and label them "Z". Correct, but useless at a glance
             // for a viewer who has to mentally re-add their own UTC offset.
             if (!Number.isFinite(untilMs)) return "paused";
-            const d = new Date(untilMs);
-            const hh = String(d.getHours()).padStart(2, "0");
-            const mm = String(d.getMinutes()).padStart(2, "0");
-            // A bare time is ambiguous the moment a park outlasts today -
-            // cline-glm and cline-muse-local both routinely park multiple
-            // days out. "Mon 22" over MM/DD or DD/MM: both of those are
-            // genuinely ambiguous depending on the viewer's own locale
-            // conventions, a three-letter month name never is.
-            const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-            const month = MONTHS[d.getMonth()] ?? "?";
-            return `paused til ${month} ${d.getDate()}, ${hh}:${mm}`;
+            return `paused til ${localStamp(new Date(untilMs))}`;
           }
           case "failing": return `failing ${numberOrZero(lane.ok)}/${numberOrZero(lane.recent)}`;
           case "idle": return "idle";
@@ -5317,10 +5319,7 @@ def inject_lanes_panel_into_ringside_html(html: str) -> str:
           text = "Queue paused · flag unreadable · oe resume clears it";
         } else {
           const d = new Date(Date.parse(typeof qp.paused_at === "string" ? qp.paused_at : ""));
-          const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-          const since = Number.isFinite(d.getTime())
-            ? `${MONTHS[d.getMonth()] ?? "?"} ${d.getDate()}, ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`
-            : "unknown time";
+          const since = Number.isFinite(d.getTime()) ? localStamp(d) : "unknown time";
           const reason = typeof qp.reason === "string" && qp.reason.trim() ? qp.reason.trim() : "no reason given";
           text = `Queue paused · since ${since} · ${reason} · oe resume to restart`;
         }
