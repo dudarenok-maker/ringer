@@ -774,6 +774,11 @@ class LanesPanelBrowserBehaviorTests(unittest.TestCase):
             capture_output=True,
             text=True,
             timeout=15,
+            # A fixed zone with a +13:45 offset: CI runs under TZ=UTC, where a
+            # local-time rendering and a UTC one are the same string, so no
+            # test could tell them apart. The offset is also not a whole hour,
+            # so a getUTCHours-only mistake cannot pass by coincidence.
+            env={**os.environ, "TZ": "Pacific/Chatham"},
         )
         self.assertEqual(result.returncode, 0, f"stdout={result.stdout!r} stderr={result.stderr!r}")
         return json.loads(result.stdout.strip().splitlines()[-1])
@@ -882,7 +887,8 @@ class LanesPanelBrowserBehaviorTests(unittest.TestCase):
         console.log(JSON.stringify({ html: fakePanel.innerHTML, expectedTime: `${expectedHH}:${expectedMM}`, expectedDate }));
         """
         out = self.run_js(harness)
-        self.assertIn(f"paused til {out['expectedDate']}, {out['expectedTime']}", out["html"])
+        # 04:11:52Z on 2026-08-22 is 16:56 in Pacific/Chatham (UTC+12:45, standard).
+        self.assertIn("paused til Aug 22, 16:56", out["html"])
         self.assertNotIn("04:11Z", out["html"])
 
     def test_paused_until_a_month_boundary_does_not_show_the_wrong_month(self) -> None:
@@ -921,13 +927,10 @@ class LanesPanelBrowserBehaviorTests(unittest.TestCase):
         global.fetch = async () => ({{ json: async () => snapshot }});
         installLanesPanel();
         await new Promise(r => setTimeout(r, 50));
-        const d = new Date('2026-11-14T09:05:00Z');
-        const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-        const expectedSince = `${{MONTHS[d.getMonth()]}} ${{d.getDate()}}, ${{String(d.getHours()).padStart(2,'0')}}:${{String(d.getMinutes()).padStart(2,'0')}}`;
         // Escape non-ASCII so the banner's middle dots survive run_js's
         // text=True decode (the locale codepage on Windows, not UTF-8).
         const esc = c => '\\\\u' + c.charCodeAt(0).toString(16).padStart(4, '0');
-        console.log(JSON.stringify({{ hidden: fakePanel.hidden, className: fakePanel.className, html: fakePanel.innerHTML, expectedSince }}).replace(/[^\\x00-\\x7f]/g, esc));
+        console.log(JSON.stringify({{ hidden: fakePanel.hidden, className: fakePanel.className, html: fakePanel.innerHTML }}).replace(/[^\\x00-\\x7f]/g, esc));
         """
         return self.run_js(harness)
 
@@ -937,7 +940,8 @@ class LanesPanelBrowserBehaviorTests(unittest.TestCase):
         )
         html = str(out["html"])
         self.assertIn("queue-paused-banner", html)
-        self.assertIn(f"Queue paused · since {out['expectedSince']} · GPU swap · oe resume to restart", html)
+        # 09:05Z on 2026-11-14 is 22:50 in Pacific/Chatham (UTC+13:45, DST).
+        self.assertIn("Queue paused · since Nov 14, 22:50 · GPU swap · oe resume to restart", html)
 
     def test_queue_paused_banner_warns_at_24_hours(self) -> None:
         # paused_at is relative to now: the warn decision also reads the wall
