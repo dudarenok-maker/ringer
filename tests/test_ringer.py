@@ -980,6 +980,21 @@ class LanesPanelBrowserBehaviorTests(unittest.TestCase):
         self.assertNotIn("<img", html)
         self.assertIn("&lt;img", html)
 
+    def test_empty_or_whitespace_reason_reads_no_reason_given(self) -> None:
+        for reason in ("''", "'   \\t '"):
+            out = self.render_with_queue_paused(
+                f"{{ paused_at: new Date(Date.now() - 60000).toISOString(), reason: {reason}, by: 'm', corrupt: false, age_minutes: 1 }}"
+            )
+            self.assertIn(" · no reason given · oe resume to restart", str(out["html"]), reason)
+
+    def test_queue_paused_banner_renders_above_the_lane_chips(self) -> None:
+        out = self.render_with_queue_paused(
+            "{ paused_at: new Date(Date.now() - 60000).toISOString(), reason: 'r', by: 'm', corrupt: false, age_minutes: 1 }"
+        )
+        html = str(out["html"])
+        self.assertIn("lane-chip", html)
+        self.assertLess(html.index("queue-paused-banner"), html.index("lane-chip"))
+
     def test_queue_paused_banner_shows_even_with_no_lane_rows(self) -> None:
         out = self.render_with_queue_paused(
             "{ paused_at: '2026-11-14T09:05:00Z', reason: 'r', by: 'm', corrupt: false, age_minutes: 5 }", lanes_js="[]"

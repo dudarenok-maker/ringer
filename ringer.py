@@ -5321,7 +5321,7 @@ def inject_lanes_panel_into_ringside_html(html: str) -> str:
           const since = Number.isFinite(d.getTime())
             ? `${MONTHS[d.getMonth()] ?? "?"} ${d.getDate()}, ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`
             : "unknown time";
-          const reason = typeof qp.reason === "string" && qp.reason ? qp.reason : "no reason given";
+          const reason = typeof qp.reason === "string" && qp.reason.trim() ? qp.reason.trim() : "no reason given";
           text = `Queue paused · since ${since} · ${reason} · oe resume to restart`;
         }
         return `<div class="queue-paused-banner${warn ? " queue-paused-warn" : ""}" role="status">${html(text)}</div>`;
