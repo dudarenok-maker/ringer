@@ -909,12 +909,12 @@ class LanesPanelBrowserBehaviorTests(unittest.TestCase):
         out = self.run_js(harness)
         self.assertIn(f"paused til {out['expectedDate']}", out["html"])
 
-    def render_with_queue_paused(self, queue_paused_js: str, lanes_js: str = "[{ engine: 'cline', state: 'running', running_minutes: 3 }]") -> dict[str, object]:
+    def render_with_queue_paused(self, queue_paused_js: str, lanes_js: str = "[{ engine: 'cline', state: 'running', running_minutes: 3 }]", snapshot_age_min: int = 0) -> dict[str, object]:
         harness = f"""
         const fakePanel = {{ hidden: true, className: '', innerHTML: '' }};
         fakePanel.classList = {{ toggle(name, on) {{ fakePanel.className = on ? name : ''; }}, remove() {{ fakePanel.className = ''; }} }};
         global.document = {{ getElementById: id => (id === 'lanes-panel' ? fakePanel : null) }};
-        const nowIso = new Date().toISOString();
+        const nowIso = new Date(Date.now() - {snapshot_age_min} * 60 * 1000).toISOString();
         const snapshot = {{ generated_utc: nowIso, lanes: {lanes_js} }};
         const qp = {queue_paused_js};
         if (qp !== undefined) snapshot.queue_paused = qp;
@@ -927,7 +927,7 @@ class LanesPanelBrowserBehaviorTests(unittest.TestCase):
         // Escape non-ASCII so the banner's middle dots survive run_js's
         // text=True decode (the locale codepage on Windows, not UTF-8).
         const esc = c => '\\\\u' + c.charCodeAt(0).toString(16).padStart(4, '0');
-        console.log(JSON.stringify({{ hidden: fakePanel.hidden, html: fakePanel.innerHTML, expectedSince }}).replace(/[^\\x00-\\x7f]/g, esc));
+        console.log(JSON.stringify({{ hidden: fakePanel.hidden, className: fakePanel.className, html: fakePanel.innerHTML, expectedSince }}).replace(/[^\\x00-\\x7f]/g, esc));
         """
         return self.run_js(harness)
 
@@ -973,6 +973,25 @@ class LanesPanelBrowserBehaviorTests(unittest.TestCase):
         )
         self.assertFalse(out["hidden"])
         self.assertIn("queue-paused-banner", str(out["html"]))
+
+    def test_non_corrupt_pause_with_null_or_garbage_paused_at_reads_unknown_time(self) -> None:
+        for paused_at in ("null", "'not-a-date'"):
+            out = self.render_with_queue_paused(
+                f"{{ paused_at: {paused_at}, reason: 'r', by: 'm', corrupt: false, age_minutes: 5 }}"
+            )
+            html = str(out["html"])
+            self.assertIn("since unknown time", html, paused_at)
+            self.assertNotIn("Invalid Date", html, paused_at)
+
+    def test_stale_snapshot_still_shows_the_pause_banner_and_the_stale_state(self) -> None:
+        out = self.render_with_queue_paused(
+            "{ paused_at: '2026-11-14T09:05:00Z', reason: 'r', by: 'm', corrupt: false, age_minutes: 5 }",
+            snapshot_age_min=20,
+        )
+        html = str(out["html"])
+        self.assertIn("queue-paused-banner", html)
+        self.assertEqual(out["className"], "lanes-stale")
+        self.assertIn("stale - last updated", html)
 
     def test_banner_markup_and_style_are_in_the_injected_html(self) -> None:
         injected = ringer.inject_lanes_panel_into_ringside_html(ringer.RINGSIDE_HTML_PATH.read_text(encoding="utf-8"))
