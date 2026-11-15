@@ -909,6 +909,97 @@ class LanesPanelBrowserBehaviorTests(unittest.TestCase):
         out = self.run_js(harness)
         self.assertIn(f"paused til {out['expectedDate']}", out["html"])
 
+    def render_with_queue_paused(self, queue_paused_js: str, lanes_js: str = "[{ engine: 'cline', state: 'running', running_minutes: 3 }]") -> dict[str, object]:
+        harness = f"""
+        const fakePanel = {{ hidden: true, className: '', innerHTML: '' }};
+        fakePanel.classList = {{ toggle(name, on) {{ fakePanel.className = on ? name : ''; }}, remove() {{ fakePanel.className = ''; }} }};
+        global.document = {{ getElementById: id => (id === 'lanes-panel' ? fakePanel : null) }};
+        const nowIso = new Date().toISOString();
+        const snapshot = {{ generated_utc: nowIso, lanes: {lanes_js} }};
+        const qp = {queue_paused_js};
+        if (qp !== undefined) snapshot.queue_paused = qp;
+        global.fetch = async () => ({{ json: async () => snapshot }});
+        installLanesPanel();
+        await new Promise(r => setTimeout(r, 50));
+        const d = new Date('2026-11-14T09:05:00Z');
+        const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+        const expectedSince = `${{MONTHS[d.getMonth()]}} ${{d.getDate()}}, ${{String(d.getHours()).padStart(2,'0')}}:${{String(d.getMinutes()).padStart(2,'0')}}`;
+        // Escape non-ASCII so the banner's middle dots survive run_js's
+        // text=True decode (the locale codepage on Windows, not UTF-8).
+        const esc = c => '\\\\u' + c.charCodeAt(0).toString(16).padStart(4, '0');
+        console.log(JSON.stringify({{ hidden: fakePanel.hidden, html: fakePanel.innerHTML, expectedSince }}).replace(/[^\\x00-\\x7f]/g, esc));
+        """
+        return self.run_js(harness)
+
+    def test_queue_paused_banner_shows_since_reason_and_resume_hint(self) -> None:
+        out = self.render_with_queue_paused(
+            "{ paused_at: '2026-11-14T09:05:00Z', reason: 'GPU swap', by: 'mike', corrupt: false, age_minutes: 30 }"
+        )
+        html = str(out["html"])
+        self.assertIn("queue-paused-banner", html)
+        self.assertIn(f"Queue paused · since {out['expectedSince']} · GPU swap · oe resume to restart", html)
+        self.assertNotIn("queue-paused-warn", html)
+
+    def test_queue_paused_banner_warns_at_24_hours(self) -> None:
+        under = self.render_with_queue_paused("{ paused_at: '2026-11-14T09:05:00Z', reason: 'r', by: 'm', corrupt: false, age_minutes: 1439 }")
+        self.assertNotIn("queue-paused-warn", str(under["html"]))
+        at = self.render_with_queue_paused("{ paused_at: '2026-11-14T09:05:00Z', reason: 'r', by: 'm', corrupt: false, age_minutes: 1440 }")
+        self.assertIn("queue-paused-warn", str(at["html"]))
+
+    def test_queue_paused_corrupt_flag_warns_without_a_time_or_reason(self) -> None:
+        out = self.render_with_queue_paused("{ paused_at: null, reason: 'x', by: 'y', corrupt: true, age_minutes: null }")
+        html = str(out["html"])
+        self.assertIn("Queue paused · flag unreadable · oe resume clears it", html)
+        self.assertIn("queue-paused-warn", html)
+        self.assertNotIn("since", html)
+
+    def test_no_banner_when_queue_paused_is_null_or_absent(self) -> None:
+        for js in ("null", "undefined"):
+            out = self.render_with_queue_paused(js)
+            self.assertNotIn("queue-paused-banner", str(out["html"]), js)
+            self.assertIn("cline", str(out["html"]), js)
+
+    def test_queue_paused_reason_is_escaped_not_injected(self) -> None:
+        out = self.render_with_queue_paused(
+            "{ paused_at: '2026-11-14T09:05:00Z', reason: '<img src=x onerror=alert(1)>', by: 'm', corrupt: false, age_minutes: 5 }"
+        )
+        html = str(out["html"])
+        self.assertNotIn("<img", html)
+        self.assertIn("&lt;img", html)
+
+    def test_queue_paused_banner_shows_even_with_no_lane_rows(self) -> None:
+        out = self.render_with_queue_paused(
+            "{ paused_at: '2026-11-14T09:05:00Z', reason: 'r', by: 'm', corrupt: false, age_minutes: 5 }", lanes_js="[]"
+        )
+        self.assertFalse(out["hidden"])
+        self.assertIn("queue-paused-banner", str(out["html"]))
+
+    def test_banner_markup_and_style_are_in_the_injected_html(self) -> None:
+        injected = ringer.inject_lanes_panel_into_ringside_html(ringer.RINGSIDE_HTML_PATH.read_text(encoding="utf-8"))
+        self.assertIn(".queue-paused-banner {", injected)
+        self.assertIn(".queue-paused-banner.queue-paused-warn {", injected)
+
+
+class QueuePausedPassThroughTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory(prefix="ringer-lane-status-qp-")
+        self.original_path = ringer.OPEN_ENGINE_LANE_STATUS_PATH
+        ringer.OPEN_ENGINE_LANE_STATUS_PATH = Path(self.tmp.name) / "lane-status.json"
+
+    def tearDown(self) -> None:
+        ringer.OPEN_ENGINE_LANE_STATUS_PATH = self.original_path
+        self.tmp.cleanup()
+
+    def test_queue_paused_object_null_and_absent_pass_through_unchanged(self) -> None:
+        obj = {"paused_at": "2026-11-14T09:05:00Z", "reason": "r", "by": "m", "corrupt": False, "age_minutes": 5}
+        for snapshot in (
+            {"generated_utc": "x", "lanes": [], "queue_paused": obj},
+            {"generated_utc": "x", "lanes": [], "queue_paused": None},
+            {"generated_utc": "x", "lanes": []},
+        ):
+            ringer.OPEN_ENGINE_LANE_STATUS_PATH.write_text(json.dumps(snapshot), encoding="utf-8")
+            self.assertEqual(ringer.read_open_engine_lane_status(), snapshot)
+
 
 class ReadOpenEngineDoctorHealthTests(unittest.TestCase):
     def test_valid_json_any_exit_code_is_returned(self):

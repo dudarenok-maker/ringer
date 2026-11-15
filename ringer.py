@@ -5152,6 +5152,19 @@ def inject_lanes_panel_into_ringside_html(html: str) -> str:
     .lanes-panel:empty { display: none; }
     .lanes-panel.lanes-stale { opacity: 0.55; }
     .lanes-stale-note { font-size: 11px; color: var(--fail); }
+    .queue-paused-banner {
+      flex-basis: 100%;
+      text-align: center;
+      font-size: 12px;
+      padding: 4px 9px;
+      border: 1px solid color-mix(in srgb, var(--accent) 48%, var(--hairline));
+      border-radius: 6px;
+      color: var(--accent);
+    }
+    .queue-paused-banner.queue-paused-warn {
+      border-color: color-mix(in srgb, var(--fail) 48%, var(--hairline));
+      color: var(--fail);
+    }
     .lane-chip {
       display: inline-flex;
       align-items: baseline;
@@ -5281,9 +5294,36 @@ def inject_lanes_panel_into_ringside_html(html: str) -> str:
         return `stale - last updated ${ageMin}m ago`;
       }
 
+      // An Open Engine queue pause (oe pause) is the whole queue, not one
+      // lane, so it reads as a full-width banner above the chips. null / absent
+      // (an older producer) renders nothing. Warns once the pause has outlived
+      // a day - a forgotten pause is the failure this exists to surface - or
+      // when the flag file itself is unreadable (still paused, fail closed).
+      const QUEUE_PAUSED_WARN_MINUTES = 1440;
+      function queuePausedBanner(payload) {
+        const qp = payload?.queue_paused;
+        if (!qp || typeof qp !== "object") return "";
+        const age = Number(qp.age_minutes);
+        const warn = qp.corrupt === true || (Number.isFinite(age) && age >= QUEUE_PAUSED_WARN_MINUTES);
+        let text;
+        if (qp.corrupt === true) {
+          text = "Queue paused · flag unreadable · oe resume clears it";
+        } else {
+          const d = new Date(Date.parse(typeof qp.paused_at === "string" ? qp.paused_at : ""));
+          const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+          const since = Number.isFinite(d.getTime())
+            ? `${MONTHS[d.getMonth()] ?? "?"} ${d.getDate()}, ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`
+            : "unknown time";
+          const reason = typeof qp.reason === "string" && qp.reason ? qp.reason : "no reason given";
+          text = `Queue paused · since ${since} · ${reason} · oe resume to restart`;
+        }
+        return `<div class="queue-paused-banner${warn ? " queue-paused-warn" : ""}" role="status">${html(text)}</div>`;
+      }
+
       function render(payload) {
         const lanes = Array.isArray(payload?.lanes) ? payload.lanes : [];
-        if (!lanes.length) {
+        const bannerHtml = queuePausedBanner(payload);
+        if (!lanes.length && !bannerHtml) {
           panel.hidden = true;
           panel.classList.remove("lanes-stale");
           panel.innerHTML = "";
@@ -5294,7 +5334,7 @@ def inject_lanes_panel_into_ringside_html(html: str) -> str:
         panel.classList.toggle("lanes-stale", Boolean(note));
         const chipsHtml = lanes.map(chipFor).join("");
         const noteHtml = note ? `<span class="lanes-stale-note">${html(note)}</span>` : "";
-        panel.innerHTML = chipsHtml + noteHtml;
+        panel.innerHTML = bannerHtml + chipsHtml + noteHtml;
         panel.hidden = false;
         lastGoodHtml = panel.innerHTML;
       }
