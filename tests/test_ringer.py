@@ -774,6 +774,11 @@ class LanesPanelBrowserBehaviorTests(unittest.TestCase):
             capture_output=True,
             text=True,
             timeout=15,
+            # A fixed zone with a +13:45 offset: CI runs under TZ=UTC, where a
+            # local-time rendering and a UTC one are the same string, so no
+            # test could tell them apart. The offset is also not a whole hour,
+            # so a getUTCHours-only mistake cannot pass by coincidence.
+            env={**os.environ, "TZ": "Pacific/Chatham"},
         )
         self.assertEqual(result.returncode, 0, f"stdout={result.stdout!r} stderr={result.stderr!r}")
         return json.loads(result.stdout.strip().splitlines()[-1])
@@ -882,7 +887,8 @@ class LanesPanelBrowserBehaviorTests(unittest.TestCase):
         console.log(JSON.stringify({ html: fakePanel.innerHTML, expectedTime: `${expectedHH}:${expectedMM}`, expectedDate }));
         """
         out = self.run_js(harness)
-        self.assertIn(f"paused til {out['expectedDate']}, {out['expectedTime']}", out["html"])
+        # 04:11:52Z on 2026-08-22 is 16:56 in Pacific/Chatham (UTC+12:45, standard).
+        self.assertIn("paused til Aug 22, 16:56", out["html"])
         self.assertNotIn("04:11Z", out["html"])
 
     def test_paused_until_a_month_boundary_does_not_show_the_wrong_month(self) -> None:
@@ -908,6 +914,138 @@ class LanesPanelBrowserBehaviorTests(unittest.TestCase):
         """
         out = self.run_js(harness)
         self.assertIn(f"paused til {out['expectedDate']}", out["html"])
+
+    def render_with_queue_paused(self, queue_paused_js: str, lanes_js: str = "[{ engine: 'cline', state: 'running', running_minutes: 3 }]", snapshot_age_min: int = 0) -> dict[str, object]:
+        harness = f"""
+        const fakePanel = {{ hidden: true, className: '', innerHTML: '' }};
+        fakePanel.classList = {{ toggle(name, on) {{ fakePanel.className = on ? name : ''; }}, remove() {{ fakePanel.className = ''; }} }};
+        global.document = {{ getElementById: id => (id === 'lanes-panel' ? fakePanel : null) }};
+        const nowIso = new Date(Date.now() - {snapshot_age_min} * 60 * 1000).toISOString();
+        const snapshot = {{ generated_utc: nowIso, lanes: {lanes_js} }};
+        const qp = {queue_paused_js};
+        if (qp !== undefined) snapshot.queue_paused = qp;
+        global.fetch = async () => ({{ json: async () => snapshot }});
+        installLanesPanel();
+        await new Promise(r => setTimeout(r, 50));
+        // Escape non-ASCII so the banner's middle dots survive run_js's
+        // text=True decode (the locale codepage on Windows, not UTF-8).
+        const esc = c => '\\\\u' + c.charCodeAt(0).toString(16).padStart(4, '0');
+        console.log(JSON.stringify({{ hidden: fakePanel.hidden, className: fakePanel.className, html: fakePanel.innerHTML }}).replace(/[^\\x00-\\x7f]/g, esc));
+        """
+        return self.run_js(harness)
+
+    def test_queue_paused_banner_shows_since_reason_and_resume_hint(self) -> None:
+        out = self.render_with_queue_paused(
+            "{ paused_at: '2026-11-14T09:05:00Z', reason: 'GPU swap', by: 'mike', corrupt: false, age_minutes: 30 }"
+        )
+        html = str(out["html"])
+        self.assertIn("queue-paused-banner", html)
+        # 09:05Z on 2026-11-14 is 22:50 in Pacific/Chatham (UTC+13:45, DST).
+        self.assertIn("Queue paused · since Nov 14, 22:50 · GPU swap · oe resume to restart", html)
+
+    def test_queue_paused_banner_warns_at_24_hours(self) -> None:
+        # paused_at is relative to now: the warn decision also reads the wall
+        # clock, so a fixed instant would drift into the warn range over time.
+        under = self.render_with_queue_paused("{ paused_at: new Date(Date.now() - 60000).toISOString(), reason: 'r', by: 'm', corrupt: false, age_minutes: 1439 }")
+        self.assertNotIn("queue-paused-warn", str(under["html"]))
+        at = self.render_with_queue_paused("{ paused_at: new Date(Date.now() - 60000).toISOString(), reason: 'r', by: 'm', corrupt: false, age_minutes: 1440 }")
+        self.assertIn("queue-paused-warn", str(at["html"]))
+
+    def test_queue_paused_warns_on_a_frozen_age_minutes_using_paused_at(self) -> None:
+        # age_minutes is stamped by the producer and freezes once it stops, so
+        # the warn decision must also look at the wall-clock age of paused_at.
+        out = self.render_with_queue_paused(
+            "{ paused_at: new Date(Date.now() - (2 * 1440 + 30) * 60000).toISOString(), reason: 'r', by: 'm', corrupt: false, age_minutes: 30 }"
+        )
+        self.assertIn("queue-paused-warn", str(out["html"]))
+
+    def test_queue_paused_corrupt_flag_warns_without_a_time_or_reason(self) -> None:
+        out = self.render_with_queue_paused("{ paused_at: null, reason: 'x', by: 'y', corrupt: true, age_minutes: null }")
+        html = str(out["html"])
+        self.assertIn("Queue paused · flag unreadable · oe resume clears it", html)
+        self.assertIn("queue-paused-warn", html)
+        self.assertNotIn("since", html)
+
+    def test_no_banner_when_queue_paused_is_null_or_absent(self) -> None:
+        for js in ("null", "undefined"):
+            out = self.render_with_queue_paused(js)
+            self.assertNotIn("queue-paused-banner", str(out["html"]), js)
+            self.assertIn("cline", str(out["html"]), js)
+
+    def test_queue_paused_reason_is_escaped_not_injected(self) -> None:
+        out = self.render_with_queue_paused(
+            "{ paused_at: '2026-11-14T09:05:00Z', reason: '<img src=x onerror=alert(1)>', by: 'm', corrupt: false, age_minutes: 5 }"
+        )
+        html = str(out["html"])
+        self.assertNotIn("<img", html)
+        self.assertIn("&lt;img", html)
+
+    def test_empty_or_whitespace_reason_reads_no_reason_given(self) -> None:
+        for reason in ("''", "'   \\t '"):
+            out = self.render_with_queue_paused(
+                f"{{ paused_at: new Date(Date.now() - 60000).toISOString(), reason: {reason}, by: 'm', corrupt: false, age_minutes: 1 }}"
+            )
+            self.assertIn(" · no reason given · oe resume to restart", str(out["html"]), reason)
+
+    def test_queue_paused_banner_renders_above_the_lane_chips(self) -> None:
+        out = self.render_with_queue_paused(
+            "{ paused_at: new Date(Date.now() - 60000).toISOString(), reason: 'r', by: 'm', corrupt: false, age_minutes: 1 }"
+        )
+        html = str(out["html"])
+        self.assertIn("lane-chip", html)
+        self.assertLess(html.index("queue-paused-banner"), html.index("lane-chip"))
+
+    def test_queue_paused_banner_shows_even_with_no_lane_rows(self) -> None:
+        out = self.render_with_queue_paused(
+            "{ paused_at: '2026-11-14T09:05:00Z', reason: 'r', by: 'm', corrupt: false, age_minutes: 5 }", lanes_js="[]"
+        )
+        self.assertFalse(out["hidden"])
+        self.assertIn("queue-paused-banner", str(out["html"]))
+
+    def test_non_corrupt_pause_with_null_or_garbage_paused_at_reads_unknown_time(self) -> None:
+        for paused_at in ("null", "'not-a-date'"):
+            out = self.render_with_queue_paused(
+                f"{{ paused_at: {paused_at}, reason: 'r', by: 'm', corrupt: false, age_minutes: 5 }}"
+            )
+            html = str(out["html"])
+            self.assertIn("since unknown time", html, paused_at)
+            self.assertNotIn("Invalid Date", html, paused_at)
+
+    def test_stale_snapshot_still_shows_the_pause_banner_and_the_stale_state(self) -> None:
+        out = self.render_with_queue_paused(
+            "{ paused_at: '2026-11-14T09:05:00Z', reason: 'r', by: 'm', corrupt: false, age_minutes: 5 }",
+            snapshot_age_min=20,
+        )
+        html = str(out["html"])
+        self.assertIn("queue-paused-banner", html)
+        self.assertEqual(out["className"], "lanes-stale")
+        self.assertIn("stale - last updated", html)
+
+    def test_banner_markup_and_style_are_in_the_injected_html(self) -> None:
+        injected = ringer.inject_lanes_panel_into_ringside_html(ringer.RINGSIDE_HTML_PATH.read_text(encoding="utf-8"))
+        self.assertIn(".queue-paused-banner {", injected)
+        self.assertIn(".queue-paused-banner.queue-paused-warn {", injected)
+
+
+class QueuePausedPassThroughTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory(prefix="ringer-lane-status-qp-")
+        self.original_path = ringer.OPEN_ENGINE_LANE_STATUS_PATH
+        ringer.OPEN_ENGINE_LANE_STATUS_PATH = Path(self.tmp.name) / "lane-status.json"
+
+    def tearDown(self) -> None:
+        ringer.OPEN_ENGINE_LANE_STATUS_PATH = self.original_path
+        self.tmp.cleanup()
+
+    def test_queue_paused_object_null_and_absent_pass_through_unchanged(self) -> None:
+        obj = {"paused_at": "2026-11-14T09:05:00Z", "reason": "r", "by": "m", "corrupt": False, "age_minutes": 5}
+        for snapshot in (
+            {"generated_utc": "x", "lanes": [], "queue_paused": obj},
+            {"generated_utc": "x", "lanes": [], "queue_paused": None},
+            {"generated_utc": "x", "lanes": []},
+        ):
+            ringer.OPEN_ENGINE_LANE_STATUS_PATH.write_text(json.dumps(snapshot), encoding="utf-8")
+            self.assertEqual(ringer.read_open_engine_lane_status(), snapshot)
 
 
 class ReadOpenEngineDoctorHealthTests(unittest.TestCase):

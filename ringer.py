@@ -5152,6 +5152,19 @@ def inject_lanes_panel_into_ringside_html(html: str) -> str:
     .lanes-panel:empty { display: none; }
     .lanes-panel.lanes-stale { opacity: 0.55; }
     .lanes-stale-note { font-size: 11px; color: var(--fail); }
+    .queue-paused-banner {
+      flex-basis: 100%;
+      text-align: center;
+      font-size: 12px;
+      padding: 4px 9px;
+      border: 1px solid color-mix(in srgb, var(--accent) 48%, var(--hairline));
+      border-radius: 6px;
+      color: var(--accent);
+    }
+    .queue-paused-banner.queue-paused-warn {
+      border-color: color-mix(in srgb, var(--fail) 48%, var(--hairline));
+      color: var(--fail);
+    }
     .lane-chip {
       display: inline-flex;
       align-items: baseline;
@@ -5212,6 +5225,18 @@ def inject_lanes_panel_into_ringside_html(html: str) -> str:
       // degrade to a legible "unknown"/blank rather than throwing and taking
       // the whole render down with it (a single bad row used to freeze every
       // OTHER lane's chip on its last-known value, forever).
+      // "Mon D, HH:MM" in the viewer's local time. A bare time is ambiguous the
+      // moment a park outlasts today - cline-glm and cline-muse-local both
+      // routinely park multiple days out. "Mon 22" over MM/DD or DD/MM: both of
+      // those are genuinely ambiguous depending on the viewer's own locale
+      // conventions, a three-letter month name never is.
+      function localStamp(d) {
+        const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+        const hh = String(d.getHours()).padStart(2, "0");
+        const mm = String(d.getMinutes()).padStart(2, "0");
+        return `${MONTHS[d.getMonth()] ?? "?"} ${d.getDate()}, ${hh}:${mm}`;
+      }
+
       function laneDetail(lane) {
         switch (safeState(lane)) {
           case "running": return `running ${numberOrZero(lane.running_minutes)}m`;
@@ -5224,17 +5249,7 @@ def inject_lanes_panel_into_ringside_html(html: str) -> str:
             // verbatim and label them "Z". Correct, but useless at a glance
             // for a viewer who has to mentally re-add their own UTC offset.
             if (!Number.isFinite(untilMs)) return "paused";
-            const d = new Date(untilMs);
-            const hh = String(d.getHours()).padStart(2, "0");
-            const mm = String(d.getMinutes()).padStart(2, "0");
-            // A bare time is ambiguous the moment a park outlasts today -
-            // cline-glm and cline-muse-local both routinely park multiple
-            // days out. "Mon 22" over MM/DD or DD/MM: both of those are
-            // genuinely ambiguous depending on the viewer's own locale
-            // conventions, a three-letter month name never is.
-            const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-            const month = MONTHS[d.getMonth()] ?? "?";
-            return `paused til ${month} ${d.getDate()}, ${hh}:${mm}`;
+            return `paused til ${localStamp(new Date(untilMs))}`;
           }
           case "failing": return `failing ${numberOrZero(lane.ok)}/${numberOrZero(lane.recent)}`;
           case "idle": return "idle";
@@ -5281,9 +5296,40 @@ def inject_lanes_panel_into_ringside_html(html: str) -> str:
         return `stale - last updated ${ageMin}m ago`;
       }
 
+      // An Open Engine queue pause (oe pause) is the whole queue, not one
+      // lane, so it reads as a full-width banner above the chips. null / absent
+      // (an older producer) renders nothing. Warns once the pause has outlived
+      // a day - a forgotten pause is the failure this exists to surface - or
+      // when the flag file itself is unreadable (still paused, fail closed).
+      const QUEUE_PAUSED_WARN_MINUTES = 1440;
+      function queuePausedBanner(payload) {
+        const qp = payload?.queue_paused;
+        if (!qp || typeof qp !== "object") return "";
+        // age_minutes is stamped by the producer, so it freezes the moment the
+        // producer stops; paused_at against the wall clock keeps ageing.
+        let age = Number(qp.age_minutes);
+        const pausedMs = Date.parse(typeof qp.paused_at === "string" ? qp.paused_at : "");
+        if (Number.isFinite(pausedMs)) {
+          const wallAge = (Date.now() - pausedMs) / 60000;
+          age = Number.isFinite(age) ? Math.max(age, wallAge) : wallAge;
+        }
+        const warn = qp.corrupt === true || (Number.isFinite(age) && age >= QUEUE_PAUSED_WARN_MINUTES);
+        let text;
+        if (qp.corrupt === true) {
+          text = "Queue paused · flag unreadable · oe resume clears it";
+        } else {
+          const d = new Date(Date.parse(typeof qp.paused_at === "string" ? qp.paused_at : ""));
+          const since = Number.isFinite(d.getTime()) ? localStamp(d) : "unknown time";
+          const reason = typeof qp.reason === "string" && qp.reason.trim() ? qp.reason.trim() : "no reason given";
+          text = `Queue paused · since ${since} · ${reason} · oe resume to restart`;
+        }
+        return `<div class="queue-paused-banner${warn ? " queue-paused-warn" : ""}" role="status">${html(text)}</div>`;
+      }
+
       function render(payload) {
         const lanes = Array.isArray(payload?.lanes) ? payload.lanes : [];
-        if (!lanes.length) {
+        const bannerHtml = queuePausedBanner(payload);
+        if (!lanes.length && !bannerHtml) {
           panel.hidden = true;
           panel.classList.remove("lanes-stale");
           panel.innerHTML = "";
@@ -5294,7 +5340,7 @@ def inject_lanes_panel_into_ringside_html(html: str) -> str:
         panel.classList.toggle("lanes-stale", Boolean(note));
         const chipsHtml = lanes.map(chipFor).join("");
         const noteHtml = note ? `<span class="lanes-stale-note">${html(note)}</span>` : "";
-        panel.innerHTML = chipsHtml + noteHtml;
+        panel.innerHTML = bannerHtml + chipsHtml + noteHtml;
         panel.hidden = false;
         lastGoodHtml = panel.innerHTML;
       }
