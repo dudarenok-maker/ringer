@@ -163,5 +163,52 @@ class EngineBinRelativeTests(unittest.TestCase):
         self.assertEqual(os.path.abspath("rel/claude"), got)
 
 
+    def preflight_as_not_nt(self, bin_value: str) -> None:
+        if os.name != "nt":
+            return self.preflight(bin_value)
+        # Pin Path's concrete class: pathlib consults os.name to pick one.
+        concrete_path = type(Path())
+        with unittest.mock.patch("ringer.os.name", "posix"):
+            with unittest.mock.patch("ringer.Path", concrete_path):
+                self.preflight(bin_value)
+
+    def test_exe_only_extensionless_bin_is_refused_when_not_windows(self) -> None:
+        (self.root / "tools").mkdir()
+        (self.root / "tools" / "tool.exe").write_text("", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            self.preflight_as_not_nt("./tools/tool")
+
+    def test_windows_cmd_only_extensionless_bin_is_refused(self) -> None:
+        if os.name != "nt":
+            self.skipTest("CreateProcess appends .exe on Windows only")
+        (self.root / "tools").mkdir()
+        (self.root / "tools" / "tool.cmd").write_text("", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            self.preflight("./tools/tool")
+
+    def test_windows_bin_with_suffix_does_not_get_exe_appended(self) -> None:
+        if os.name != "nt":
+            self.skipTest("CreateProcess appends .exe on Windows only")
+        (self.root / "tools").mkdir()
+        (self.root / "tools" / "tool.bin.exe").write_text("", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            self.preflight("./tools/tool.bin")
+
+    def test_windows_forward_slash_absolute_bin_finds_exe(self) -> None:
+        if os.name != "nt":
+            self.skipTest("CreateProcess appends .exe on Windows only")
+        (self.root / "tools").mkdir()
+        (self.root / "tools" / "mycli.exe").write_text("", encoding="utf-8")
+        self.preflight((self.root / "tools" / "mycli").as_posix())
+
+    def test_windows_forward_slash_absolute_bin_with_only_cmd_is_refused(self) -> None:
+        if os.name != "nt":
+            self.skipTest("CreateProcess appends .exe on Windows only")
+        (self.root / "tools").mkdir()
+        (self.root / "tools" / "mycli.cmd").write_text("", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            self.preflight((self.root / "tools" / "mycli").as_posix())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

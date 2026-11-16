@@ -10944,7 +10944,7 @@ def preflight_engine_bins(manifest: Manifest, config: AppConfig) -> None:
         if engine is None:
             continue  # validate_manifest_engines already rejected this
         bin_path = engine.bin
-        if os.sep in bin_path:
+        if os.sep in bin_path or (os.altsep is not None and os.altsep in bin_path):
             found = Path(bin_path)
             missing = not (found.is_file() and os.access(found, os.X_OK))
             # CreateProcess appends ".exe" (only) to a name with no extension.
