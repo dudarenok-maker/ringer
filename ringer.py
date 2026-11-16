@@ -1517,6 +1517,12 @@ def as_string_tuple(value: Any, *, key: str) -> tuple[str, ...]:
     return tuple(str(item) for item in value)
 
 
+def anchor_which_hit(hit: str) -> str:
+    # which() resolves a relative PATH entry (or an empty one, reported as the
+    # bare name) against Ringer's cwd; the spawn would use the task dir.
+    return hit if os.path.isabs(hit) else os.path.abspath(hit)
+
+
 def normalize_engine_bin(bin_path: str) -> str:
     if bin_path == "~" or (
         bin_path.startswith("~") and bin_path[1] in (os.sep, os.altsep)
@@ -1528,12 +1534,19 @@ def normalize_engine_bin(bin_path: str) -> str:
         os.sep in bin_path or (os.altsep is not None and os.altsep in bin_path)
     ):
         bin_path = os.path.abspath(bin_path)
+    elif os.name != "nt" and not os.path.isabs(bin_path):
+        # A bare name that PATH finds through a relative entry has the same
+        # split; one found through an absolute entry stays bare.
+        hit = shutil.which(bin_path)
+        if hit and not os.path.isabs(hit):
+            bin_path = anchor_which_hit(hit)
     return bin_path
 
 
 def built_in_codex_engine() -> EngineConfig:
+    hit = shutil.which(DEFAULT_ENGINE_NAME)
     resolved = normalize_engine_bin(
-        shutil.which(DEFAULT_ENGINE_NAME) or DEFAULT_ENGINE_NAME
+        anchor_which_hit(hit) if hit else DEFAULT_ENGINE_NAME
     )
     return EngineConfig(
         name=DEFAULT_ENGINE_NAME,

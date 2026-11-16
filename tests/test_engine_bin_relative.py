@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT))
 from ringer import (  # noqa: E402
     build_worker_command,
     load_engines,
+    normalize_engine_bin,
     preflight_engine_bins,
 )
 
@@ -112,6 +113,54 @@ class EngineBinRelativeTests(unittest.TestCase):
         got = engines["codex"].bin
         self.assertTrue(os.path.isabs(got), got)
         self.assertEqual(str(self.root / "rel" / "codex"), str(Path(got)))
+
+    def test_codex_default_pinned_for_every_relative_which_spelling(self) -> None:
+        # A bare hit is which()'s answer for an empty PATH entry.
+        for spelling in (
+            os.path.join(".", "rel", "codex"),
+            os.path.join("rel", "codex"),
+            "codex",
+        ):
+            with self.subTest(spelling=spelling):
+                with unittest.mock.patch("ringer.shutil.which", return_value=spelling):
+                    got = load_engines(None)["codex"].bin
+                self.assertTrue(os.path.isabs(got), got)
+                self.assertEqual(os.path.abspath(spelling), got)
+
+    def bare_bin_as_posix(self, name: str, which_hit: str | None) -> str:
+        # os.name is read at call time; the patch spans only this pure call.
+        with unittest.mock.patch("ringer.shutil.which", return_value=which_hit):
+            with unittest.mock.patch("ringer.os.name", "posix"):
+                return normalize_engine_bin(name)
+
+    def test_bare_bin_found_through_relative_path_entry_is_pinned_on_posix(self) -> None:
+        for spelling in (
+            os.path.join(".", "node_modules", ".bin", "codex"),
+            os.path.join("rel", "codex"),
+            "codex",  # which() reports an empty PATH entry as the bare name
+        ):
+            with self.subTest(spelling=spelling):
+                got = self.bare_bin_as_posix("codex", spelling)
+                self.assertTrue(os.path.isabs(got), got)
+                self.assertEqual(os.path.abspath(spelling), got)
+
+    def test_bare_bin_found_through_absolute_path_entry_stays_bare_on_posix(self) -> None:
+        hit = str(self.root / "usr" / "bin" / "codex")
+        self.assertEqual("codex", self.bare_bin_as_posix("codex", hit))
+
+    def test_bare_bin_not_found_stays_bare_on_posix(self) -> None:
+        self.assertEqual("codex", self.bare_bin_as_posix("codex", None))
+
+    def test_bare_bin_never_pinned_on_windows(self) -> None:
+        with unittest.mock.patch("ringer.shutil.which", return_value="rel/codex"):
+            with unittest.mock.patch("ringer.os.name", "nt"):
+                self.assertEqual("codex", normalize_engine_bin("codex"))
+
+    def test_configured_bare_bin_is_pinned_through_load_engines(self) -> None:
+        with unittest.mock.patch("ringer.shutil.which", return_value="rel/claude"):
+            with unittest.mock.patch("ringer.os.name", "posix"):
+                got = self.bin_for("claude")
+        self.assertEqual(os.path.abspath("rel/claude"), got)
 
 
 if __name__ == "__main__":
