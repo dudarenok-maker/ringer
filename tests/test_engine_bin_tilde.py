@@ -79,11 +79,27 @@ class EngineBinTildeTests(unittest.TestCase):
         engine = SimpleNamespace(bin=bin_value)
         config = SimpleNamespace(engines={"tilde": engine})
         manifest = SimpleNamespace(tasks=[SimpleNamespace(engine="tilde")])
-        with unittest.mock.patch.object(
-            Path, "expanduser", return_value=Path(sys.executable)
-        ):
-            with self.assertRaisesRegex(ValueError, "engine 'tilde' binary not found"):
-                preflight_engine_bins(manifest, config)
+        with tempfile.TemporaryDirectory() as fake_home:
+            tool = Path(fake_home) / "tool"
+            tool.write_text("", encoding="utf-8")
+            tool.chmod(0o755)
+            real = os.path.expanduser
+
+            def fake(p):
+                p = os.fspath(p)
+                if p.startswith("~nosuchuser"):
+                    return fake_home + p[len("~nosuchuser"):]
+                return real(p)
+
+            # Patch os.path.expanduser: Path.expanduser delegates to it, so one
+            # patch covers both spellings of an expansion in preflight.
+            with unittest.mock.patch.object(os.path, "expanduser", side_effect=fake):
+                # Positive control: either spelling WOULD find the tool.
+                self.assertTrue(Path(bin_value).expanduser().is_file())
+                self.assertTrue(Path(os.path.expanduser(bin_value)).is_file())
+                with self.assertRaisesRegex(ValueError, "engine 'tilde' binary not found"):
+                    preflight_engine_bins(manifest, config)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
