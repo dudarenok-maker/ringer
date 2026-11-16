@@ -53,13 +53,13 @@ class EngineBinTildeTests(unittest.TestCase):
 
     def test_other_user_and_double_tilde_forms_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as home:
-            for value in ("~otheruser\\x", "~otheruser/x", "~~\\x", "~~/x"):
-                self.assertEqual(value, self.bin_for(value, home), value)
-
-    def test_relative_path_with_dir_part_unchanged(self) -> None:
-        with tempfile.TemporaryDirectory() as home:
-            for value in ("./tool", "bin/tool.exe", "bin\\tool.exe"):
-                self.assertEqual(value, self.bin_for(value, home), value)
+            # Not home forms, so never expanded to home; they are ordinary
+            # relative paths and anchor to cwd (see test_engine_bin_relative).
+            for value in ("~otheruser/x", "~~/x"):
+                self.assertEqual(os.path.abspath(value), self.bin_for(value, home), value)
+            for value in ("~otheruser\\x", "~~\\x"):
+                expected = os.path.abspath(value) if os.name == "nt" else value
+                self.assertEqual(expected, self.bin_for(value, home), value)
 
     def test_bare_name_is_untouched(self) -> None:
         with tempfile.TemporaryDirectory() as home:
