@@ -10928,6 +10928,9 @@ def preflight_engine_bins(manifest: Manifest, config: AppConfig) -> None:
         if os.sep in bin_path:
             found = Path(bin_path)
             missing = not (found.is_file() and os.access(found, os.X_OK))
+            # CreateProcess appends ".exe" (only) to a name with no extension.
+            if missing and os.name == "nt" and found.suffix == "":
+                missing = not Path(bin_path + ".exe").is_file()
         else:
             missing = shutil.which(bin_path) is None
         if missing:

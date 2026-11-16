@@ -8,11 +8,16 @@ import tempfile
 import unittest
 import unittest.mock
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from ringer import build_worker_command, load_engines  # noqa: E402
+from ringer import (  # noqa: E402
+    build_worker_command,
+    load_engines,
+    preflight_engine_bins,
+)
 
 ARGS = ["run", "{spec}"]
 
@@ -79,6 +84,26 @@ class EngineBinRelativeTests(unittest.TestCase):
             engine, taskdir=other, spec="s", full_access=False
         )
         self.assertEqual(str(tool), str(Path(command[0])))
+
+    def preflight(self, bin_value: str) -> None:
+        engines = load_engines({"rel": {"bin": bin_value, "args_template": ARGS}})
+        config = SimpleNamespace(engines=engines)
+        manifest = SimpleNamespace(tasks=[SimpleNamespace(engine="rel")])
+        preflight_engine_bins(manifest, config)
+
+    def test_windows_extensionless_anchored_bin_finds_exe(self) -> None:
+        if os.name != "nt":
+            self.skipTest("CreateProcess appends .exe on Windows only")
+        (self.root / "tools").mkdir()
+        (self.root / "tools" / "tool.exe").write_text("", encoding="utf-8")
+        self.preflight("./tools/tool")
+
+    def test_windows_extensionless_anchored_bin_without_exe_is_missing(self) -> None:
+        if os.name != "nt":
+            self.skipTest("CreateProcess appends .exe on Windows only")
+        (self.root / "tools").mkdir()
+        with self.assertRaises(ValueError):
+            self.preflight("./tools/tool")
 
 
 if __name__ == "__main__":
