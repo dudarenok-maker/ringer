@@ -8,11 +8,16 @@ import tempfile
 import unittest
 import unittest.mock
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from ringer import built_in_codex_engine, load_engines  # noqa: E402
+from ringer import (  # noqa: E402
+    built_in_codex_engine,
+    load_engines,
+    preflight_engine_bins,
+)
 
 ARGS = ["run", "{spec}"]
 
@@ -69,13 +74,16 @@ class EngineBinTildeTests(unittest.TestCase):
         engines = load_engines({"codex": {}})
         self.assertEqual(built_in_codex_engine().bin, engines["codex"].bin)
 
-    def test_unexpandable_home_names_the_key(self) -> None:
-        boom = RuntimeError("Could not determine home directory.")
-        with unittest.mock.patch.object(Path, "expanduser", side_effect=boom):
-            with self.assertRaises(ValueError) as ctx:
-                load_engines({"tilde": {"bin": "~/x", "args_template": ARGS}})
-        self.assertIn("engines.tilde.bin", str(ctx.exception))
-
+    def test_preflight_does_not_expand_bins_the_loader_left_alone(self) -> None:
+        bin_value = "~nosuchuser" + os.sep + "tool"
+        engine = SimpleNamespace(bin=bin_value)
+        config = SimpleNamespace(engines={"tilde": engine})
+        manifest = SimpleNamespace(tasks=[SimpleNamespace(engine="tilde")])
+        with unittest.mock.patch.object(
+            Path, "expanduser", return_value=Path(sys.executable)
+        ):
+            with self.assertRaisesRegex(ValueError, "engine 'tilde' binary not found"):
+                preflight_engine_bins(manifest, config)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

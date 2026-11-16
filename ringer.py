@@ -1592,12 +1592,7 @@ def load_engines(raw: Any) -> dict[str, EngineConfig]:
         if bin_path == "~" or (
             bin_path.startswith("~") and bin_path[1] in (os.sep, os.altsep)
         ):
-            try:
-                bin_path = str(Path(bin_path).expanduser())
-            except RuntimeError as exc:
-                raise ValueError(
-                    f"engines.{clean_name}.bin: cannot expand '~' ({exc})"
-                ) from exc
+            bin_path = str(Path(bin_path).expanduser())
         if not bin_path:
             raise ValueError(f"engines.{clean_name}.bin must not be empty")
         args_template = as_string_tuple(
@@ -10925,7 +10920,7 @@ def preflight_engine_bins(manifest: Manifest, config: AppConfig) -> None:
             continue  # validate_manifest_engines already rejected this
         bin_path = engine.bin
         if os.sep in bin_path:
-            found = Path(bin_path).expanduser()
+            found = Path(bin_path)
             missing = not (found.is_file() and os.access(found, os.X_OK))
         else:
             missing = shutil.which(bin_path) is None
