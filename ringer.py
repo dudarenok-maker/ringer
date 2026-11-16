@@ -1589,6 +1589,8 @@ def load_engines(raw: Any) -> dict[str, EngineConfig]:
         base = engines.get(clean_name)
         default_bin = base.bin if base else clean_name
         bin_path = str(section.get("bin", default_bin)).strip()
+        if bin_path.startswith("~"):
+            bin_path = str(Path(bin_path).expanduser())
         if not bin_path:
             raise ValueError(f"engines.{clean_name}.bin must not be empty")
         args_template = as_string_tuple(
