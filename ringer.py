@@ -1517,8 +1517,24 @@ def as_string_tuple(value: Any, *, key: str) -> tuple[str, ...]:
     return tuple(str(item) for item in value)
 
 
+def normalize_engine_bin(bin_path: str) -> str:
+    if bin_path == "~" or (
+        bin_path.startswith("~") and bin_path[1] in (os.sep, os.altsep)
+    ):
+        bin_path = str(Path(bin_path).expanduser())
+    # A relative path with a directory part would resolve against the task
+    # dir at spawn on POSIX but Ringer's cwd in preflight; pin it to cwd.
+    if not os.path.isabs(bin_path) and (
+        os.sep in bin_path or (os.altsep is not None and os.altsep in bin_path)
+    ):
+        bin_path = os.path.abspath(bin_path)
+    return bin_path
+
+
 def built_in_codex_engine() -> EngineConfig:
-    resolved = shutil.which(DEFAULT_ENGINE_NAME) or DEFAULT_ENGINE_NAME
+    resolved = normalize_engine_bin(
+        shutil.which(DEFAULT_ENGINE_NAME) or DEFAULT_ENGINE_NAME
+    )
     return EngineConfig(
         name=DEFAULT_ENGINE_NAME,
         bin=resolved,
@@ -1588,17 +1604,7 @@ def load_engines(raw: Any) -> dict[str, EngineConfig]:
             raise ValueError("engine name must not be empty")
         base = engines.get(clean_name)
         default_bin = base.bin if base else clean_name
-        bin_path = str(section.get("bin", default_bin)).strip()
-        if bin_path == "~" or (
-            bin_path.startswith("~") and bin_path[1] in (os.sep, os.altsep)
-        ):
-            bin_path = str(Path(bin_path).expanduser())
-        # A relative path with a directory part would resolve against the task
-        # dir at spawn on POSIX but Ringer's cwd in preflight; pin it to cwd.
-        if not os.path.isabs(bin_path) and (
-            os.sep in bin_path or (os.altsep is not None and os.altsep in bin_path)
-        ):
-            bin_path = os.path.abspath(bin_path)
+        bin_path = normalize_engine_bin(str(section.get("bin", default_bin)).strip())
         if not bin_path:
             raise ValueError(f"engines.{clean_name}.bin must not be empty")
         args_template = as_string_tuple(

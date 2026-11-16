@@ -105,6 +105,14 @@ class EngineBinRelativeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.preflight("./tools/tool")
 
+    def test_codex_default_from_relative_path_entry_is_anchored(self) -> None:
+        rel = os.path.join(".", "rel", "codex")
+        with unittest.mock.patch("ringer.shutil.which", return_value=rel):
+            engines = load_engines(None)
+        got = engines["codex"].bin
+        self.assertTrue(os.path.isabs(got), got)
+        self.assertEqual(str(self.root / "rel" / "codex"), str(Path(got)))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
