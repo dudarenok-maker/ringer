@@ -1593,6 +1593,12 @@ def load_engines(raw: Any) -> dict[str, EngineConfig]:
             bin_path.startswith("~") and bin_path[1] in (os.sep, os.altsep)
         ):
             bin_path = str(Path(bin_path).expanduser())
+        # A relative path with a directory part would resolve against the task
+        # dir at spawn on POSIX but Ringer's cwd in preflight; pin it to cwd.
+        if not os.path.isabs(bin_path) and (
+            os.sep in bin_path or (os.altsep is not None and os.altsep in bin_path)
+        ):
+            bin_path = os.path.abspath(bin_path)
         if not bin_path:
             raise ValueError(f"engines.{clean_name}.bin must not be empty")
         args_template = as_string_tuple(

@@ -197,6 +197,8 @@ bin = "/usr/local/bin/mycli"
 args_template = ["run", "{spec}", "--dir", "{taskdir}"]
 ```
 
+A `bin` with no directory part (`mycli`) is looked up on `PATH`; a relative path with a directory part (`./mycli`, `tools/mycli`) is resolved against the directory Ringer is launched from.
+
 Per-task `"engine": "mymodel"` routes work to it — the invariants (stdin closed, process-group kill, executed verification, raw logs) apply to every engine identically.
 
 ### The universal harness: OpenCode + OpenRouter
